@@ -285,8 +285,8 @@ function yahooToTradeRadar(symbol, chart) {
     i++
   ) {
     const c =
-      adj[i] ??
-      q.close?.[i];
+      q.close?.[i] ??
+      adj[i];
 
     const o = q.open?.[i];
     const h = q.high?.[i];
