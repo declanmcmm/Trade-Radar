@@ -962,12 +962,37 @@ async function enrich(symbol, data) {
     return cached.data;
   }
 
-  await Promise.allSettled([
-    enrichQuote(symbol, data),
-    enrichCalendar(symbol, data),
-    enrichOptions(symbol, data),
-    enrichNews(symbol, data)
-  ]);
+  const results = await Promise.allSettled([
+  enrichQuote(symbol, data),
+  enrichCalendar(symbol, data),
+  enrichOptions(symbol, data),
+  enrichNews(symbol, data)
+]);
+
+const names = [
+  "quote",
+  "calendar",
+  "options",
+  "news"
+];
+
+data.enrichment = {};
+
+results.forEach((r, i) => {
+  data.enrichment[names[i]] =
+    r.status === "fulfilled"
+      ? {
+          ok: true
+        }
+      : {
+          ok: false,
+          error: String(
+            r.reason?.message ||
+            r.reason ||
+            "Unknown error"
+          ).slice(0, 250)
+        };
+});
 
   if (
     data.options?.expectedMovePct != null &&
