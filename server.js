@@ -263,94 +263,98 @@ function yahooToTradeRadar(symbol, chart) {
   const meta = chart.meta || {};
   const timestamps = chart.timestamp || [];
   const quote = chart.indicators?.quote?.[0] || {};
-  const adj = chart.indicators?.adjclose?.[0]?.adjclose || [];
+  const adjClose = chart.indicators?.adjclose?.[0]?.adjclose || [];
 
-  const rows = [];
+  const bars = [];
 
   for (let i = 0; i < timestamps.length; i++) {
-    const close =
-      adj[i] ??
-      quote.close?.[i] ??
-      null;
+    const close = adjClose[i] ?? quote.close?.[i];
 
-    if (close == null) continue;
+    const o = quote.open?.[i];
+    const h = quote.high?.[i];
+    const l = quote.low?.[i];
+    const v = quote.volume?.[i];
 
-    rows.push({
-      date: new Date(timestamps[i] * 1000)
-        .toISOString()
-        .slice(0, 10),
-      open: quote.open?.[i] ?? null,
-      high: quote.high?.[i] ?? null,
-      low: quote.low?.[i] ?? null,
-      close,
-      volume: quote.volume?.[i] ?? 0
-    });
+    if (
+      Number.isFinite(Number(o)) &&
+      Number.isFinite(Number(h)) &&
+      Number.isFinite(Number(l)) &&
+      Number.isFinite(Number(close)) &&
+      Number.isFinite(Number(v))
+    ) {
+      bars.push({
+        d: new Date(timestamps[i] * 1000)
+          .toISOString()
+          .slice(0, 10),
+        o: Number(o),
+        h: Number(h),
+        l: Number(l),
+        c: Number(close),
+        v: Number(v)
+      });
+    }
   }
 
-  if (!rows.length) {
-    throw new Error("Yahoo returned no historical prices");
+  if (!bars.length) {
+    throw new Error("Yahoo returned no usable price history");
   }
 
-  const latest = rows[rows.length - 1];
+  const price =
+    Number(meta.regularMarketPrice) ||
+    Number(meta.postMarketPrice) ||
+    Number(meta.previousClose) ||
+    bars[bars.length - 1].c;
 
   return {
     ticker: symbol,
-    symbol,
+    name: meta.longName || meta.shortName || symbol,
+    asof: bars[bars.length - 1].d,
 
-    price: latest.close,
+    sector: undefined,
+    industry: undefined,
 
-    change:
-      rows.length >= 2
-        ? latest.close - rows[rows.length - 2].close
-        : 0,
+    provenance: {
+      quote: {
+        source: "Yahoo Finance",
+        ts: new Date().toISOString()
+      },
+      bars: {
+        source: "Yahoo Finance chart",
+        ts: new Date().toISOString()
+      }
+    },
 
-    changePct:
-      rows.length >= 2 && rows[rows.length - 2].close
-        ? ((latest.close - rows[rows.length - 2].close) /
-            rows[rows.length - 2].close) *
-          100
-        : 0,
+    quote: {
+      price: price,
+      source: "Yahoo Finance"
+    },
 
-    currency: meta.currency || "USD",
+    bars: bars,
 
-    exchange:
-      meta.exchangeName ||
-      meta.fullExchangeName ||
-      "",
-
-    marketState: meta.marketState || "",
-
-    history: rows,
-
-    // Fields used by Trade Radar when available.
     fundamentals: {
-      marketCap: null,
-      pe: null,
-      forwardPE: null,
-      eps: null,
-      revenueGrowth: null,
-      profitMargin: null,
-      beta: null,
-      dividendYield: null,
-      shortPctFloat: null,
-      analystTarget: null
+      marketCap: Number.isFinite(Number(meta.marketCap))
+        ? Number(meta.marketCap)
+        : undefined,
+
+      sharesOut: undefined,
+      floatShares: undefined,
+      high52: undefined,
+      low52: undefined,
+      beta: undefined,
+
+      shortPctFloat: undefined,
+      daysToCover: undefined,
+      analystTarget: undefined,
+      instOwnPct: undefined
     },
 
-    options: {
-      available: false,
-      callVolume: null,
-      putVolume: null,
-      volume: null,
-      openInterest: null,
-      unusual: false,
-      volVsAvg: null
-    },
+    earnings: undefined,
 
-    news: [],
+    options: undefined,
 
-    earnings: null,
+    catalysts: [],
 
-    source: "Yahoo Finance"
+    news: []
   };
 }
 
