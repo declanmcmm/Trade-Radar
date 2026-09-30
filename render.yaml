@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: trade-radar
+    runtime: node
+    buildCommand: ''
+    startCommand: node server.js
+    envVars:
+      - key: ALPHA_VANTAGE_API_KEY
+        sync: false
+      - key: FINNHUB_API_KEY
+        sync: false

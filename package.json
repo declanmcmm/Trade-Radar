@@ -1,0 +1,9 @@
+{
+  "name": "trade-radar",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Trade Radar stock analysis app with automatic server-side market data",
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "engines": { "node": ">=18" }
+}
