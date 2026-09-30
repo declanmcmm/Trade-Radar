@@ -1,813 +1,552 @@
-const http = require('http');
-const fs = require('fs');
-const path = require('path');
-const { URL } = require('url');
+const http = require("http");
+const https = require("https");
+const { URL } = require("url");
 
-const PORT = Number(process.env.PORT || 3000);
-const HOST = process.env.HOST || '0.0.0.0';
+const PORT = process.env.PORT || 10000;
 
-function loadDotEnv(file) {
-  try {
-    for (const line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
-      const m = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/);
-      if (m && !process.env[m[1]]) {
-        process.env[m[1]] = m[2].replace(/^['"]|['"]$/g, '');
-      }
-    }
-  } catch {}
+const CACHE = new Map();
+const CACHE_TTL = 60 * 1000;
+
+// Yahoo session state
+let yahooCookie = "";
+let yahooCrumb = "";
+let yahooSessionTime = 0;
+
+const USER_AGENT =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+  "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36";
+
+function cleanTicker(symbol) {
+  return String(symbol || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9.\-^=]/g, "")
+    .slice(0, 15);
 }
 
-loadDotEnv(path.join(__dirname, '.env'));
-
-const AV_KEY = process.env.ALPHA_VANTAGE_API_KEY || '';
-const FINNHUB_KEY = process.env.FINNHUB_API_KEY || '';
-
-const ROOT = __dirname;
-const INDEX = path.join(ROOT, 'trade-radar.html');
-
-const cache = new Map();
-const CACHE_MS = 60 * 1000;
-
-function json(res, status, body) {
-  const out = JSON.stringify(body);
-
-  res.writeHead(status, {
-    'Content-Type': 'application/json; charset=utf-8',
-    'Cache-Control': 'no-store',
-    'Access-Control-Allow-Origin': '*'
-  });
-
-  res.end(out);
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-function sendFile(res, file) {
-  fs.createReadStream(file)
-    .on('error', () => {
-      res.writeHead(404);
-      res.end('Not found');
-    })
-    .pipe(res);
-}
+function httpGet(url, headers = {}, timeout = 12000) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(url);
 
-async function getText(url, headers = {}) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 15000);
-
-  try {
-    const r = await fetch(url, {
+    const options = {
+      hostname: u.hostname,
+      path: u.pathname + u.search,
+      method: "GET",
+      timeout,
       headers: {
-        'User-Agent': 'Trade-Radar/1.0',
-        Accept: '*/*',
+        "User-Agent": USER_AGENT,
+        "Accept": "*/*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Connection": "keep-alive",
         ...headers
-      },
-      signal: controller.signal
-    });
-
-    const text = await r.text();
-
-    if (!r.ok) {
-      throw new Error(`Upstream HTTP ${r.status}`);
-    }
-
-    return text;
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-async function getJSON(url, headers = {}) {
-  const text = await getText(url, headers);
-
-  try {
-    return JSON.parse(text);
-  } catch {
-    throw new Error('Upstream returned invalid JSON');
-  }
-}
-
-function finite(x) {
-  const n = Number(x);
-  return Number.isFinite(n) ? n : undefined;
-}
-
-function stamp() {
-  return new Date().toISOString();
-}
-
-function cleanBars(timestamps, q) {
-  const ts = timestamps || [];
-
-  const o = q?.open || [];
-  const h = q?.high || [];
-  const l = q?.low || [];
-  const c = q?.close || [];
-  const v = q?.volume || [];
-
-  return ts
-    .map((x, i) => ({
-      d: new Date(Number(x) * 1000).toISOString().slice(0, 10),
-      o: finite(o[i]),
-      h: finite(h[i]),
-      l: finite(l[i]),
-      c: finite(c[i]),
-      v: finite(v[i])
-    }))
-    .filter(b =>
-      b.d &&
-      [b.o, b.h, b.l, b.c, b.v].every(Number.isFinite)
-    );
-}
-
-/* -----------------------------
-   YAHOO FINANCE
------------------------------ */
-
-async function yahooBase(t) {
-  let lastError;
-
-  for (const host of [
-    'query1.finance.yahoo.com',
-    'query2.finance.yahoo.com'
-  ]) {
-    try {
-      const url =
-        `https://${host}/v8/finance/chart/` +
-        `${encodeURIComponent(t)}` +
-        `?range=2y&interval=1d&events=div%2Csplits`;
-
-      const data = await getJSON(url);
-
-      const result = data?.chart?.result?.[0];
-
-      if (!result) {
-        throw new Error('Ticker not found');
       }
-
-      const meta = result.meta || {};
-
-      const price =
-        meta.regularMarketPrice ??
-        meta.postMarketPrice ??
-        meta.previousClose;
-
-      const bars = cleanBars(
-        result.timestamp,
-        result.indicators?.quote?.[0]
-      );
-
-      if (!bars.length || !Number.isFinite(Number(price))) {
-        throw new Error('No usable quote/history');
-      }
-
-      const now = stamp();
-
-      return {
-        ticker: t,
-        name: meta.longName || meta.shortName || t,
-        asof: bars.at(-1).d,
-
-        sector: undefined,
-        industry: undefined,
-
-        provenance: {
-          quote: {
-            source: 'Yahoo Finance chart via Trade Radar backend',
-            ts: now
-          },
-          bars: {
-            source: 'Yahoo Finance chart via Trade Radar backend',
-            ts: now
-          }
-        },
-
-        quote: {
-          price: Number(price),
-          source: 'Yahoo Finance via backend'
-        },
-
-        bars,
-
-        fundamentals: {
-          marketCap: finite(meta.marketCap),
-          sharesOut: undefined,
-          floatShares: undefined,
-          high52: undefined,
-          low52: undefined,
-          beta: undefined
-        },
-
-        earnings: undefined,
-        options: undefined,
-        catalysts: [],
-        news: [],
-
-        dataMode: 'automatic'
-      };
-
-    } catch (error) {
-      lastError = error;
-    }
-  }
-
-  throw lastError || new Error('Yahoo Finance unavailable');
-}
-
-/* -----------------------------
-   STOOQ FALLBACK
------------------------------ */
-
-async function stooqBase(t) {
-  const symbol = `${t.toLowerCase()}.us`;
-
-  const url =
-    `https://stooq.com/q/d/l/?s=${encodeURIComponent(symbol)}` +
-    `&d1=20240101&d2=20991231&i=d`;
-
-  const csv = await getText(url);
-
-  if (
-    !csv ||
-    csv.toLowerCase().includes('no data') ||
-    csv.toLowerCase().includes('symbol not found')
-  ) {
-    throw new Error('Stooq has no data for this ticker');
-  }
-
-  const lines = csv.trim().split(/\r?\n/);
-
-  if (lines.length < 3) {
-    throw new Error('Stooq returned insufficient history');
-  }
-
-  const bars = [];
-
-  for (const line of lines.slice(1)) {
-    const parts = line.split(',');
-
-    if (parts.length < 6) continue;
-
-    const [date, open, high, low, close, volume] = parts;
-
-    const bar = {
-      d: date,
-      o: finite(open),
-      h: finite(high),
-      l: finite(low),
-      c: finite(close),
-      v: finite(volume)
     };
 
-    if (
-      bar.d &&
-      [bar.o, bar.h, bar.l, bar.c, bar.v].every(Number.isFinite)
-    ) {
-      bars.push(bar);
+    const req = https.request(options, res => {
+      let body = "";
+
+      res.setEncoding("utf8");
+
+      res.on("data", chunk => {
+        body += chunk;
+      });
+
+      res.on("end", () => {
+        resolve({
+          status: res.statusCode || 0,
+          headers: res.headers,
+          body
+        });
+      });
+    });
+
+    req.on("timeout", () => {
+      req.destroy(new Error("Request timeout"));
+    });
+
+    req.on("error", reject);
+
+    req.end();
+  });
+}
+
+/*
+ * Establish a Yahoo session.
+ *
+ * Yahoo sometimes requires a cookie/crumb combination before
+ * accepting requests from server environments.
+ */
+async function establishYahooSession(force = false) {
+  const now = Date.now();
+
+  if (
+    !force &&
+    yahooCookie &&
+    yahooCrumb &&
+    now - yahooSessionTime < 20 * 60 * 1000
+  ) {
+    return true;
+  }
+
+  const hosts = [
+    "https://fc.yahoo.com",
+    "https://query1.finance.yahoo.com",
+    "https://query2.finance.yahoo.com"
+  ];
+
+  let cookie = "";
+
+  for (const base of hosts) {
+    try {
+      const r = await httpGet(base + "/");
+
+      const setCookie = r.headers["set-cookie"];
+
+      if (Array.isArray(setCookie)) {
+        cookie = setCookie
+          .map(x => x.split(";")[0])
+          .join("; ");
+      }
+
+      if (cookie) break;
+    } catch (_) {}
+  }
+
+  if (!cookie) {
+    // Yahoo sometimes doesn't send a cookie from the root endpoint.
+    // Continue and try crumb directly.
+    cookie = yahooCookie || "";
+  }
+
+  let crumb = "";
+
+  try {
+    const r = await httpGet(
+      "https://query1.finance.yahoo.com/v1/test/getcrumb",
+      {
+        Cookie: cookie
+      }
+    );
+
+    if (r.status === 200 && r.body && !r.body.includes("<")) {
+      crumb = r.body.trim();
+    }
+  } catch (_) {}
+
+  if (!crumb) {
+    try {
+      const r = await httpGet(
+        "https://query2.finance.yahoo.com/v1/test/getcrumb",
+        {
+          Cookie: cookie
+        }
+      );
+
+      if (r.status === 200 && r.body && !r.body.includes("<")) {
+        crumb = r.body.trim();
+      }
+    } catch (_) {}
+  }
+
+  if (crumb) {
+    yahooCrumb = crumb;
+    yahooCookie = cookie;
+    yahooSessionTime = now;
+    return true;
+  }
+
+  // Chart endpoint frequently works without a crumb.
+  if (cookie) {
+    yahooCookie = cookie;
+    yahooSessionTime = now;
+  }
+
+  return false;
+}
+
+function buildYahooHeaders() {
+  const headers = {
+    "User-Agent": USER_AGENT,
+    "Accept": "application/json,text/plain,*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://finance.yahoo.com/",
+    "Origin": "https://finance.yahoo.com"
+  };
+
+  if (yahooCookie) {
+    headers.Cookie = yahooCookie;
+  }
+
+  return headers;
+}
+
+async function yahooChart(symbol, range = "2y") {
+  await establishYahooSession();
+
+  const hosts = [
+    "query1.finance.yahoo.com",
+    "query2.finance.yahoo.com"
+  ];
+
+  const errors = [];
+
+  for (const host of hosts) {
+    const params = new URLSearchParams({
+      period1: String(Math.floor(Date.now() / 1000) - 2 * 365 * 24 * 60 * 60),
+      period2: String(Math.floor(Date.now() / 1000)),
+      interval: "1d",
+      events: "div,splits",
+      includeAdjustedClose: "true"
+    });
+
+    if (yahooCrumb) {
+      params.set("crumb", yahooCrumb);
+    }
+
+    const url =
+      `https://${host}/v8/finance/chart/` +
+      encodeURIComponent(symbol) +
+      "?" +
+      params.toString();
+
+    try {
+      const r = await httpGet(url, buildYahooHeaders());
+
+      if (r.status === 429) {
+        errors.push(`${host}: HTTP 429`);
+
+        // Force a fresh session before trying the next host.
+        await establishYahooSession(true);
+        continue;
+      }
+
+      if (r.status !== 200) {
+        errors.push(`${host}: HTTP ${r.status}`);
+        continue;
+      }
+
+      let json;
+
+      try {
+        json = JSON.parse(r.body);
+      } catch {
+        errors.push(`${host}: invalid JSON`);
+        continue;
+      }
+
+      if (json.chart?.error) {
+        errors.push(
+          `${host}: ${json.chart.error.description || "Yahoo chart error"}`
+        );
+        continue;
+      }
+
+      if (!json.chart?.result?.[0]) {
+        errors.push(`${host}: no chart result`);
+        continue;
+      }
+
+      return json.chart.result[0];
+    } catch (err) {
+      errors.push(`${host}: ${err.message}`);
     }
   }
 
-  if (!bars.length) {
-    throw new Error('Stooq returned no usable bars');
+  throw new Error("Yahoo: " + errors.join(" | "));
+}
+
+function yahooToTradeRadar(symbol, chart) {
+  const meta = chart.meta || {};
+  const timestamps = chart.timestamp || [];
+  const quote = chart.indicators?.quote?.[0] || {};
+  const adj = chart.indicators?.adjclose?.[0]?.adjclose || [];
+
+  const rows = [];
+
+  for (let i = 0; i < timestamps.length; i++) {
+    const close =
+      adj[i] ??
+      quote.close?.[i] ??
+      null;
+
+    if (close == null) continue;
+
+    rows.push({
+      date: new Date(timestamps[i] * 1000)
+        .toISOString()
+        .slice(0, 10),
+      open: quote.open?.[i] ?? null,
+      high: quote.high?.[i] ?? null,
+      low: quote.low?.[i] ?? null,
+      close,
+      volume: quote.volume?.[i] ?? 0
+    });
   }
 
-  const last = bars.at(-1);
+  if (!rows.length) {
+    throw new Error("Yahoo returned no historical prices");
+  }
+
+  const latest = rows[rows.length - 1];
 
   return {
-    ticker: t,
-    name: t,
-    asof: last.d,
+    ticker: symbol,
+    symbol,
 
-    sector: undefined,
-    industry: undefined,
+    price: latest.close,
 
-    provenance: {
-      quote: {
-        source: 'Stooq via Trade Radar backend',
-        ts: stamp()
-      },
-      bars: {
-        source: 'Stooq via Trade Radar backend',
-        ts: stamp()
-      }
-    },
+    change:
+      rows.length >= 2
+        ? latest.close - rows[rows.length - 2].close
+        : 0,
 
-    quote: {
-      price: last.c,
-      source: 'Stooq via backend'
-    },
+    changePct:
+      rows.length >= 2 && rows[rows.length - 2].close
+        ? ((latest.close - rows[rows.length - 2].close) /
+            rows[rows.length - 2].close) *
+          100
+        : 0,
 
-    bars,
+    currency: meta.currency || "USD",
 
+    exchange:
+      meta.exchangeName ||
+      meta.fullExchangeName ||
+      "",
+
+    marketState: meta.marketState || "",
+
+    history: rows,
+
+    // Fields used by Trade Radar when available.
     fundamentals: {
-      marketCap: undefined,
-      sharesOut: undefined,
-      floatShares: undefined,
-      high52: undefined,
-      low52: undefined,
-      beta: undefined
+      marketCap: null,
+      pe: null,
+      forwardPE: null,
+      eps: null,
+      revenueGrowth: null,
+      profitMargin: null,
+      beta: null,
+      dividendYield: null,
+      shortPctFloat: null,
+      analystTarget: null
     },
 
-    earnings: undefined,
-    options: undefined,
-    catalysts: [],
+    options: {
+      available: false,
+      callVolume: null,
+      putVolume: null,
+      volume: null,
+      openInterest: null,
+      unusual: false,
+      volVsAvg: null
+    },
+
     news: [],
 
-    dataMode: 'automatic'
+    earnings: null,
+
+    source: "Yahoo Finance"
   };
 }
 
-/* -----------------------------
-   ALPHA VANTAGE ENRICHMENT
------------------------------ */
+async function getYahoo(symbol) {
+  const key = `yahoo:${symbol}`;
 
-async function alpha(t, rec) {
-  if (!AV_KEY) return rec;
+  const cached = CACHE.get(key);
 
-  const base = 'https://www.alphavantage.co/query';
-
-  const call = fn =>
-    getJSON(
-      `${base}?function=${fn}` +
-      `&symbol=${encodeURIComponent(t)}` +
-      `&apikey=${encodeURIComponent(AV_KEY)}`
-    );
-
-  const [overview, earnings, news] =
-    await Promise.allSettled([
-      call('OVERVIEW'),
-      call('EARNINGS_CALENDAR'),
-      call('NEWS_SENTIMENT')
-    ]);
-
-  /* Company overview */
-
-  if (overview.status === 'fulfilled') {
-    const o = overview.value;
-
-    if (o && !o.Note && !o.Information) {
-      rec.name = o.Name || rec.name;
-      rec.sector = o.Sector || rec.sector;
-      rec.industry = o.Industry || rec.industry;
-
-      const f = rec.fundamentals || {};
-
-      const fields = [
-        ['marketCap', 'MarketCapitalization'],
-        ['sharesOut', 'SharesOutstanding'],
-        ['floatShares', 'SharesFloat'],
-        ['high52', '52WeekHigh'],
-        ['low52', '52WeekLow'],
-        ['beta', 'Beta']
-      ];
-
-      for (const [destination, source] of fields) {
-        const value = finite(o[source]);
-
-        if (value !== undefined) {
-          f[destination] = value;
-        }
-      }
-
-      const target = finite(o.AnalystTargetPrice);
-
-      if (target !== undefined) {
-        f.analystTarget = target;
-      }
-
-      const rating =
-        o.AnalystRating ||
-        o.RecommendationMean;
-
-      if (rating) {
-        f.analystConsensus = String(rating);
-      }
-
-      const inst = finite(o.InstitutionalOwnership);
-
-      if (inst !== undefined) {
-        f.instOwnPct = inst;
-      }
-
-      rec.fundamentals = f;
-
-      rec.provenance.fundamentals = {
-        source: 'Alpha Vantage OVERVIEW',
-        ts: stamp()
-      };
-    }
-  }
-
-  /* Earnings */
-
-  if (
-    earnings.status === 'fulfilled' &&
-    Array.isArray(earnings.value)
-  ) {
-    const rows = earnings.value.filter(
-      x =>
-        String(x.symbol || '').toUpperCase() === t
-    );
-
-    if (rows.length) {
-      const x = rows[0];
-
-      rec.earnings = {
-        date:
-          x.reportDate ||
-          x.date ||
-          undefined,
-
-        expectedMovePct: undefined
-      };
-
-      rec.provenance.earnings = {
-        source: 'Alpha Vantage EARNINGS_CALENDAR',
-        ts: stamp()
-      };
-    }
-  }
-
-  /* News */
-
-  if (news.status === 'fulfilled') {
-    const feed = news.value?.feed;
-
-    if (Array.isArray(feed)) {
-      rec.news = feed.slice(0, 20).map(x => ({
-        headline: x.title || '',
-        date: x.time_published
-          ? `${x.time_published.slice(0, 4)}-` +
-            `${x.time_published.slice(4, 6)}-` +
-            `${x.time_published.slice(6, 8)}`
-          : undefined,
-
-        type: 'fact',
-
-        sentiment:
-          finite(x.overall_sentiment_score) || 0,
-
-        source: x.source || ''
-      }));
-
-      rec.provenance.news = {
-        source: 'Alpha Vantage NEWS_SENTIMENT',
-        ts: stamp()
-      };
-    }
-  }
-
-  return rec;
-}
-
-/* -----------------------------
-   FINNHUB ENRICHMENT
------------------------------ */
-
-async function finnhub(t, rec) {
-  if (!FINNHUB_KEY) return rec;
-
-  const base = 'https://finnhub.io/api/v1';
-
-  const get = endpoint =>
-    getJSON(
-      `${base}${endpoint}` +
-      `${endpoint.includes('?') ? '&' : '?'}token=` +
-      encodeURIComponent(FINNHUB_KEY)
-    );
-
-  const today = new Date();
-
-  const from = new Date(
-    Date.now() - 7 * 86400000
-  );
-
-  const earningsFrom = new Date(
-    Date.now() - 30 * 86400000
-  );
-
-  const earningsTo = new Date(
-    Date.now() + 120 * 86400000
-  );
-
-  const fmt = d =>
-    d.toISOString().slice(0, 10);
-
-  const [
-    profile,
-    earnings,
-    news,
-    shorts
-  ] = await Promise.allSettled([
-    get(`/stock/profile2?symbol=${encodeURIComponent(t)}`),
-
-    get(
-      `/calendar/earnings?symbol=${encodeURIComponent(t)}` +
-      `&from=${fmt(earningsFrom)}` +
-      `&to=${fmt(earningsTo)}`
-    ),
-
-    get(
-      `/company-news?symbol=${encodeURIComponent(t)}` +
-      `&from=${fmt(from)}` +
-      `&to=${fmt(today)}`
-    ),
-
-    get(
-      `/stock/short-interest?symbol=${encodeURIComponent(t)}`
-    )
-  ]);
-
-  /* Profile */
-
-  if (profile.status === 'fulfilled') {
-    const p = profile.value;
-
-    rec.name = p.name || rec.name;
-
-    rec.sector =
-      p.finnhubIndustry ||
-      rec.sector;
-
-    const f = rec.fundamentals || {};
-
-    const marketCap =
-      finite(p.marketCapitalization);
-
-    if (marketCap !== undefined) {
-      f.marketCap = marketCap * 1e6;
-    }
-
-    const shares =
-      finite(p.shareOutstanding);
-
-    if (shares !== undefined) {
-      f.sharesOut = shares * 1e6;
-    }
-
-    rec.fundamentals = f;
-  }
-
-  /* Earnings */
-
-  if (
-    earnings.status === 'fulfilled' &&
-    Array.isArray(
-      earnings.value?.earningsCalendar
-    ) &&
-    earnings.value.earningsCalendar.length
-  ) {
-    const x =
-      earnings.value.earningsCalendar[0];
-
-    rec.earnings = {
-      date: x.date,
-      expectedMovePct: undefined
-    };
-  }
-
-  /* News */
-
-  if (
-    news.status === 'fulfilled' &&
-    Array.isArray(news.value)
-  ) {
-    rec.news = news.value
-      .slice(0, 20)
-      .map(x => ({
-        headline: x.headline || '',
-        date: x.datetime
-          ? new Date(
-              x.datetime * 1000
-            ).toISOString().slice(0, 10)
-          : undefined,
-
-        type: 'fact',
-        sentiment: 0,
-        source: x.source || 'Finnhub'
-      }));
-  }
-
-  /* Short interest */
-
-  if (
-    shorts.status === 'fulfilled' &&
-    Array.isArray(shorts.value?.data) &&
-    shorts.value.data.length
-  ) {
-    const x = shorts.value.data[0];
-
-    const f = rec.fundamentals || {};
-
-    const shortShares =
-      finite(x.shortInterest);
-
-    if (shortShares !== undefined) {
-      f.shortShares = shortShares;
-    }
-
-    const shortPct =
-      finite(x.shortInterestPercentOfFloat);
-
-    if (shortPct !== undefined) {
-      f.shortPctFloat = shortPct;
-    }
-
-    rec.fundamentals = f;
-  }
-
-  return rec;
-}
-
-/* -----------------------------
-   MAIN STOCK PIPELINE
------------------------------ */
-
-async function stock(ticker) {
-  const t = ticker
-    .toUpperCase()
-    .replace(/[^A-Z0-9.\-]/g, '');
-
-  if (!/^[A-Z0-9.\-]{1,12}$/.test(t)) {
-    throw new Error('Invalid ticker');
-  }
-
-  const cached = cache.get(t);
-
-  if (
-    cached &&
-    Date.now() - cached.ts < CACHE_MS
-  ) {
+  if (cached && Date.now() - cached.time < CACHE_TTL) {
     return cached.data;
   }
 
-  let rec;
-  let primarySource = '';
+  let lastError;
 
-  /* Try Yahoo first */
-
-  try {
-    rec = await yahooBase(t);
-    primarySource = 'Yahoo Finance';
-  } catch (yahooError) {
-
-    /* Try Stooq if Yahoo fails */
-
+  // Only two attempts. This prevents a 429 from turning into
+  // dozens of requests against Yahoo.
+  for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      rec = await stooqBase(t);
-      primarySource = 'Stooq';
+      const chart = await yahooChart(symbol);
+      const data = yahooToTradeRadar(symbol, chart);
 
-      rec.warnings = [
-        `Yahoo Finance unavailable: ${yahooError.message}`,
-        'Using Stooq fallback data.'
-      ];
+      CACHE.set(key, {
+        time: Date.now(),
+        data
+      });
 
-    } catch (stooqError) {
+      return data;
+    } catch (err) {
+      lastError = err;
 
-      throw new Error(
-        `TR-206: Market data unavailable. ` +
-        `Yahoo: ${yahooError.message}. ` +
-        `Stooq: ${stooqError.message}.`
-      );
+      if (attempt === 0) {
+        await sleep(1500);
+      }
     }
   }
 
-  /* Optional Alpha Vantage enrichment */
-
-  try {
-    rec = await alpha(t, rec);
-  } catch (error) {
-    rec.warnings = [
-      ...(rec.warnings || []),
-      `Alpha Vantage enrichment unavailable: ${error.message}`
-    ];
-  }
-
-  /* Optional Finnhub enrichment */
-
-  try {
-    rec = await finnhub(t, rec);
-  } catch (error) {
-    rec.warnings = [
-      ...(rec.warnings || []),
-      `Finnhub enrichment unavailable: ${error.message}`
-    ];
-  }
-
-  rec.dataMode = 'automatic';
-
-  rec.provenance = {
-    ...(rec.provenance || {}),
-    primary: {
-      source: primarySource,
-      ts: stamp()
-    }
-  };
-
-  cache.set(t, {
-    ts: Date.now(),
-    data: rec
-  });
-
-  return rec;
+  throw lastError || new Error("Yahoo unavailable");
 }
 
-/* -----------------------------
-   SERVER
------------------------------ */
+/*
+ * Optional Alpha Vantage enrichment.
+ * This does NOT make Alpha Vantage required.
+ */
+async function alphaVantage(symbol, baseData) {
+  const key = process.env.ALPHA_VANTAGE_API_KEY;
 
-const server = http.createServer(
-  async (req, res) => {
-    try {
-      const url = new URL(
-        req.url,
-        `http://${req.headers.host || 'localhost'}`
-      );
+  if (!key) return baseData;
 
-      /* Health check */
+  try {
+    const url =
+      "https://www.alphavantage.co/query?" +
+      new URLSearchParams({
+        function: "OVERVIEW",
+        symbol,
+        apikey: key
+      }).toString();
 
-      if (url.pathname === '/api/health') {
-        return json(res, 200, {
-          ok: true,
-          service: 'trade-radar',
-          time: stamp(),
+    const r = await httpGet(url);
 
-          providers: {
-            yahoo: true,
-            stooq: true,
-            alphaVantage: Boolean(AV_KEY),
-            finnhub: Boolean(FINNHUB_KEY)
-          }
+    if (r.status !== 200) return baseData;
+
+    const j = JSON.parse(r.body);
+
+    baseData.fundamentals = {
+      ...baseData.fundamentals,
+
+      marketCap: Number(j.MarketCapitalization) || null,
+      pe: Number(j.PERatio) || null,
+      forwardPE: Number(j.ForwardPE) || null,
+      eps: Number(j.EPS) || null,
+      revenueGrowth: Number(j.QuarterlyRevenueGrowthYOY) || null,
+      profitMargin: Number(j.ProfitMargin) || null,
+      beta: Number(j.Beta) || null,
+      dividendYield: Number(j.DividendYield) || null,
+      analystTarget: Number(j.AnalystTargetPrice) || null
+    };
+
+    return baseData;
+  } catch (_) {
+    return baseData;
+  }
+}
+
+async function getStock(symbol) {
+  const yahoo = await getYahoo(symbol);
+
+  // Optional enrichment.
+  return await alphaVantage(symbol, yahoo);
+}
+
+function sendJSON(res, status, data) {
+  const body = JSON.stringify(data);
+
+  res.writeHead(status, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Cache-Control": "no-store",
+    "Access-Control-Allow-Origin": "*"
+  });
+
+  res.end(body);
+}
+
+function serveHTML(res) {
+  const fs = require("fs");
+  const path = require("path");
+
+  try {
+    const file = fs.readFileSync(
+      path.join(__dirname, "trade-radar.html"),
+      "utf8"
+    );
+
+    res.writeHead(200, {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "no-cache"
+    });
+
+    res.end(file);
+  } catch (err) {
+    sendJSON(res, 500, {
+      ok: false,
+      error: "Unable to load Trade Radar HTML"
+    });
+  }
+}
+
+const server = http.createServer(async (req, res) => {
+  try {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+
+    if (url.pathname === "/api/health") {
+      sendJSON(res, 200, {
+        ok: true,
+        service: "trade-radar",
+        time: new Date().toISOString(),
+        providers: {
+          yahoo: true,
+          yahooSession: Boolean(yahooCookie),
+          yahooCrumb: Boolean(yahooCrumb),
+          alphaVantage: Boolean(process.env.ALPHA_VANTAGE_API_KEY)
+        }
+      });
+
+      return;
+    }
+
+    if (url.pathname === "/api/stock") {
+      const symbol = cleanTicker(url.searchParams.get("symbol"));
+
+      if (!symbol) {
+        sendJSON(res, 400, {
+          ok: false,
+          error: "TR-201: Missing stock symbol"
         });
+
+        return;
       }
 
-      /* Stock API */
+      try {
+        const data = await getStock(symbol);
 
-      if (url.pathname === '/api/stock') {
-        const symbol =
-          url.searchParams.get('symbol');
-
-        if (!symbol) {
-          return json(res, 400, {
-            ok: false,
-            error: 'Missing symbol'
-          });
-        }
-
-        const data =
-          await stock(symbol);
-
-        return json(res, 200, {
+        sendJSON(res, 200, {
           ok: true,
           data
         });
+      } catch (err) {
+        sendJSON(res, 502, {
+          ok: false,
+          error: "TR-206: Market data unavailable. " + err.message
+        });
       }
 
-      /* Website */
-
-      if (
-        url.pathname === '/' ||
-        url.pathname === '/index.html'
-      ) {
-        return sendFile(res, INDEX);
-      }
-
-      /* Assets */
-
-      if (url.pathname.startsWith('/assets/')) {
-        const safePath =
-          path.normalize(
-            path.join(ROOT, url.pathname)
-          );
-
-        if (!safePath.startsWith(ROOT)) {
-          res.writeHead(403);
-          return res.end('Forbidden');
-        }
-
-        return sendFile(res, safePath);
-      }
-
-      res.writeHead(404);
-      res.end('Not found');
-
-    } catch (error) {
-      console.error(error);
-
-      return json(res, 500, {
-        ok: false,
-        error:
-          error.message ||
-          'Server error'
-      });
+      return;
     }
-  }
-);
 
-server.listen(
-  PORT,
-  HOST,
-  () => {
-    console.log(
-      `Trade Radar running on port ${PORT}`
-    );
+    if (
+      url.pathname === "/" ||
+      url.pathname === "/index.html" ||
+      url.pathname === "/trade-radar.html"
+    ) {
+      serveHTML(res);
+      return;
+    }
+
+    sendJSON(res, 404, {
+      ok: false,
+      error: "Not found"
+    });
+  } catch (err) {
+    sendJSON(res, 500, {
+      ok: false,
+      error: "TR-500: " + err.message
+    });
   }
-);
+});
+
+server.listen(PORT, "0.0.0.0", () => {
+  console.log(`Trade Radar running on port ${PORT}`);
+});
