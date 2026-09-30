@@ -166,7 +166,7 @@ let DB={};
 const PROVIDERS={
  store:t=>Promise.resolve(DB[t]),
  http:base=>t=>fetch(`${base}/${t}`).then(r=>{if(!r.ok)throw Error('HTTP '+r.status);return r.json()}),
- auto:async t=>browserLive(t)
+ auto:async t=>live(t)
 };
 let provider=PROVIDERS.auto;
 const cls=l=>['High','Strong','Positive','Unusual'].includes(l)?'g':['Low','Weak','Negative'].includes(l)?'r':l===U?'n':'y';
