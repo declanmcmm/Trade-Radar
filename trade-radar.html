@@ -5,7 +5,7 @@ html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;background:va
 nav{display:flex;gap:4px;overflow-x:auto}nav button,button{background:var(--cd);color:var(--fg);border:1px solid var(--bd);padding:8px 10px;border-radius:6px;white-space:nowrap}nav .on{border-color:var(--fg)}
 input,select,textarea{background:var(--cd);color:var(--fg);border:1px solid var(--bd);padding:8px;border-radius:6px;font:inherit}textarea{width:100%;height:120px;box-sizing:border-box}
 .card{background:var(--cd);border:1px solid var(--bd);border-radius:8px;padding:10px;margin:8px 0}.big{font-size:26px;font-weight:600}table{width:100%;border-collapse:collapse}td,th{border-bottom:1px solid var(--bd);padding:5px;text-align:left;vertical-align:top}
-details{border:1px solid var(--bd);border-radius:8px;margin:6px 0;padding:6px 10px}summary{font-weight:600;padding:4px 0}.g{color:var(--g)}.r{color:var(--r)}.y{color:var(--y)}.n{color:var(--m)}small{color:var(--m)}.riskbox{border:1px solid var(--bd);border-radius:8px;padding:12px;margin:8px 0;background:var(--cd)}.risknum{font-size:34px;font-weight:700;line-height:1}.riskbar{height:8px;border-radius:6px;background:var(--bd);overflow:hidden;margin:8px 0}.riskfill{height:100%;background:currentColor;border-radius:6px}.riskfactor{display:flex;justify-content:space-between;gap:10px;border-bottom:1px solid var(--bd);padding:5px 0}.riskfactor:last-child{border-bottom:0}.c{font-weight:600}h4{margin:10px 0 2px;text-transform:capitalize}
+details{border:1px solid var(--bd);border-radius:8px;margin:6px 0;padding:6px 10px}summary{font-weight:600;padding:4px 0}.g{color:var(--g)}.r{color:var(--r)}.y{color:var(--y)}.n{color:var(--m)}small{color:var(--m)}.c{font-weight:600}h4{margin:10px 0 2px;text-transform:capitalize}
 </style></head><body><h3>Trade Radar</h3><nav><button>Dashboard</button><button>Summary</button><button>Why moving</button><button>Screener</button><button>Compare</button><button>Load data</button></nav>
 <div class=p hidden><p>Ticker <input id=t size=8 list=tk> <button id=go>Analyze</button> <button id=rf>Refresh live</button></p><div id=out></div></div>
 <div class=p hidden><p>Ticker <input id=t5 size=8 list=tk> <button id=go5>Long or short?</button></p><div id=out5></div><p><small>Rule-based read of the loaded data for roughly 1 to 3 months. Not advice; built for a simulation game. Missing data is listed, not guessed.</small></p></div>
@@ -68,137 +68,6 @@ S.earnings=ed==null?un('Earnings date not supplied'):ed<0?un('Date is in the pas
 S.breakout=T?.r20==null?un('Not enough history'):{level:T.breakout&&(T.relVol||0)>=1.5?'High':T.breakout||(T.r20/T.price-1)<.03?'Medium':'Low',why:`${T.breakout?'Closed above':'Below'} prior 20-day high ${T.r20.toFixed(2)}${T.relVol?`, relative volume ${T.relVol.toFixed(1)}x`:''}. Breakouts on thin volume fail more often.`};
 S.downside=T?.hv==null?un('Not enough history'):{level:T.hv>=60||(T.ma[200]&&T.price<T.ma[200]&&S.momentum.level==='Weak')?'High':T.hv>=30?'Medium':'Low',why:`Driven by volatility ${T.hv.toFixed(0)}%${T.ma[200]?`, price ${T.price<T.ma[200]?'below':'above'} 200-day average`:''}.`};
 S._ed=ed;S._cs=cs;return S}
-function riskMetric(d,T,S){
-  const factors=[];
-  const add=(name,score,why)=>{
-    if(score==null||!Number.isFinite(score))return;
-    factors.push({name,score:Math.max(0,Math.min(100,score)),why});
-  };
-  const clamp=(x,a=0,b=100)=>Math.max(a,Math.min(b,x));
-
-  // 25%: realized volatility. Higher daily movement = higher trade risk.
-  if(T?.hv!=null){
-    const hv=+T.hv;
-    const score=clamp((hv-10)/90*100);
-    add('Volatility',score,`${hv.toFixed(0)}% annualized realized volatility`);
-  }
-
-  // 15%: recent drawdown / distance from the 60-day high.
-  if(T?.price&&d.bars?.length){
-    const b=d.bars.slice(-60);
-    const high=Math.max(...b.map(x=>+x.h).filter(Number.isFinite));
-    if(Number.isFinite(high)&&high>0){
-      const dd=(1-T.price/high)*100;
-      const score=clamp(dd/30*100);
-      add('Drawdown',score,`${Math.max(0,dd).toFixed(1)}% below the 60-day high`);
-    }
-  }
-
-  // 15%: event/gap risk around earnings.
-  const ed=S?._ed;
-  if(ed!=null){
-    let score;
-    if(ed<0) score=85;
-    else if(ed<=3) score=100;
-    else if(ed<=7) score=90;
-    else if(ed<=14) score=70;
-    else if(ed<=30) score=45;
-    else if(ed<=60) score=25;
-    else score=10;
-    add('Earnings',score,`Next report is ${ed<0?'past':`in ${ed} days`}`);
-  }
-
-  // 15%: options-implied move. This measures expected movement,
-  // not direction.
-  const em=d.earnings?.expectedMovePct ?? d.options?.expectedMovePct;
-  if(em!=null){
-    const x=+em;
-    const score=clamp((x-2)/13*100);
-    add('Expected move',score,`Options imply about ±${x.toFixed(1)}% through the measured expiration`);
-  }
-
-  // 10%: short-interest / squeeze-related instability.
-  const sp=d.fundamentals?.shortPctFloat;
-  if(sp!=null){
-    const x=+sp;
-    let score=x>=25?100:x>=20?90:x>=15?75:x>=10?55:x>=5?35:15;
-    const dc=d.fundamentals?.daysToCover;
-    if(dc!=null&&dc>=5) score=clamp(score+10);
-    add('Short interest',score,`${x.toFixed(1)}% of float short${dc!=null?`, ${dc.toFixed(1)} days to cover`:''}`);
-  }
-
-  // 10%: technical instability from RSI, gaps and unusually large moves.
-  if(T){
-    let score=20;
-    const reasons=[];
-    if(T.rsi!=null){
-      const extreme=Math.abs(T.rsi-50);
-      score+=clamp((extreme-15)*1.2,0,25);
-      if(T.rsi>=70||T.rsi<=30) reasons.push(`RSI ${T.rsi.toFixed(0)}`);
-    }
-    if(T.gapToday!=null){
-      const gap=Math.abs(T.gapToday);
-      score+=clamp(gap*4,0,25);
-      if(gap>=3) reasons.push(`${gap.toFixed(1)}% opening gap`);
-    }
-    if(T.perf?.['1D']!=null){
-      const move=Math.abs(T.perf['1D']);
-      score+=clamp(move*2,0,20);
-      if(move>=5) reasons.push(`${move.toFixed(1)}% 1D move`);
-    }
-    add('Technical instability',clamp(score),reasons.length?reasons.join(', '):'No major short-term technical extreme detected');
-  }
-
-  // 10%: liquidity/volume shock. Very high relative volume can mean
-  // fast-moving conditions; very low volume can increase execution risk.
-  if(T?.relVol!=null){
-    const rv=+T.relVol;
-    let score;
-    if(rv<0.5) score=75;
-    else if(rv<0.8) score=45;
-    else if(rv<=1.5) score=20;
-    else if(rv<=2.5) score=50;
-    else if(rv<=4) score=75;
-    else score=95;
-    add('Volume shock',score,`${rv.toFixed(1)}x the prior 20-day average volume`);
-  }
-
-  const weights={
-    'Volatility':25,
-    'Drawdown':15,
-    'Earnings':15,
-    'Expected move':15,
-    'Short interest':10,
-    'Technical instability':10,
-    'Volume shock':10
-  };
-
-  let weighted=0,totalWeight=0;
-  for(const f of factors){
-    const w=weights[f.name]||0;
-    weighted+=f.score*w;
-    totalWeight+=w;
-  }
-
-  if(!totalWeight){
-    return {
-      score:null,
-      level:U,
-      confidence:'None',
-      factors:[],
-      missing:['Price/market data']
-    };
-  }
-
-  const score=Math.round(weighted/totalWeight);
-  const missing=Object.keys(weights).filter(k=>!factors.some(f=>f.name===k));
-  const coverage=Math.round(totalWeight/100*100);
-  const level=score>=80?'Extreme':score>=60?'High':score>=40?'Moderate':score>=20?'Low':'Very Low';
-  const confidence=coverage>=85?'High':coverage>=65?'Medium':'Low';
-
-  return {score,level,confidence,coverage,factors,missing};
-}
-
 function squeeze(d,T){const f=d.fundamentals||{},F=[];const t=(n,ok,v)=>F.push({name:n,present:v==null?null:ok,val:v});
 t('Short interest 15%+ of float',f.shortPctFloat>=15,f.shortPctFloat);t('Days to cover 5+',f.daysToCover>=5,f.daysToCover);t('Relative volume 2x+',T?.relVol>=2,T?.relVol?.toFixed(1));t('5-day gain over 10%',T?.perf['5D']>10,T?.perf['5D']?.toFixed(1));t('Float under 50M shares',f.floatShares<5e7,f.floatShares);t('Unusual options volume',d.options?.volVsAvg>=2,d.options?.volVsAvg);t('Heavy social attention',d.social?.elevated,d.social?.elevated);
 const n=F.filter(x=>x.present).length,known=F.filter(x=>x.present!==null).length;
@@ -297,7 +166,7 @@ let DB={};
 const PROVIDERS={
  store:t=>Promise.resolve(DB[t]),
  http:base=>t=>fetch(`${base}/${t}`).then(r=>{if(!r.ok)throw Error('HTTP '+r.status);return r.json()}),
- auto:async t=>browserLive(t)
+ auto:async t=>live(t)
 };
 let provider=PROVIDERS.auto;
 const cls=l=>['High','Strong','Positive','Unusual'].includes(l)?'g':['Low','Weak','Negative'].includes(l)?'r':l===U?'n':'y';
@@ -316,8 +185,6 @@ h.push(`<div class=card><b>${esc(d.ticker)}</b> ${esc(d.name||'')} <div class=bi
 const f=d.fundamentals||{};
 h.push(sec('Validation checks',I.length?I.map(i=>`<p class=${i.lvl==='bad'?'r':'y'}><b>${i.code}</b> ${esc(i.msg)}</p>`).join(''):'<p class=g>All checks passed</p>',I.some(i=>i.lvl==='bad')));
 const dq=a.D;h.push(sec('Data confidence',`<div class=card><div class=big>${esc(dq.confidence)}</div><p>${dq.available}/${dq.total} core data fields available.</p><p>${dq.missing.length?'Missing or limiting: '+dq.missing.map(esc).join(', '):'No core data gaps detected.'}</p><small>Confidence describes data completeness/freshness, not the likelihood of a stock move.</small></div>`,true));
-const R=riskMetric(d,T,S);
-if(R.score!=null){const rc=R.level==='Extreme'||R.level==='High'?'r':R.level==='Low'||R.level==='Very Low'?'g':'y';h.push(sec('Risk metric',`<div class=riskbox><div class=big><span class="${rc}">${R.score}/100</span> <span class="${rc}">${esc(R.level)}</span></div><div class=riskbar><div class=riskfill style="width:${R.score}%;"></div></div><p><b>Risk score confidence:</b> ${esc(R.confidence)} (${R.coverage}% of weighted factors available).</p><p><small>This measures trade/setup risk, not the direction of the stock. Higher means larger potential price swings, event exposure, or instability.</small></p>${R.factors.sort((a,b)=>b.score-a.score).map(x=>`<div class=riskfactor><span><b>${esc(x.name)}</b><br><small>${esc(x.why)}</small></span><span class="${x.score>=70?'r':x.score<=30?'g':'y'}"><b>${x.score.toFixed(0)}</b></span></div>`).join('')}${R.missing.length?`<p class=n><b>Not included:</b> ${R.missing.map(esc).join(', ')}</p>`:''}</div>`,true));}
 h.push(sec('Snapshot',`<table>${[['Market cap',f.marketCap],['Sector',d.sector],['Industry',d.industry],['52w high / low',f.high52!=null?f.high52+' / '+f.low52:null],['Avg daily volume (20d)',T?.avgVol&&Math.round(T.avgVol)],['Beta',f.beta],['Short % float',f.shortPctFloat],['Institutional %',f.instOwnPct],['Analyst consensus',f.analystConsensus]].map(([k,v])=>`<tr><td>${k}</td><td>${v==null?'<span class=n>Unavailable</span>':esc(v)}</td></tr>`).join('')}</table>${prov(d,'quote')} ${prov(d,'fundamentals')}${d.provenance?.gapfill?prov(d,'gapfill'):''}`));
 h.push(sec('Trading opportunity profile',`<table>${[['Volatility','volatility'],['Catalyst strength','catalyst'],['Momentum','momentum'],['News flow','news'],['Options activity','options'],['Short interest','short'],['Earnings risk','earnings'],['Breakout potential','breakout'],['Downside risk','downside']].map(([k,x])=>`<tr><td>${k}</td><td>${chip(S[x])}</td></tr>`).join('')}</table>`,true));
 h.push(sec('Technicals',T?`<table>${Object.entries(T.perf).map(([k,v])=>`<tr><td>${k}</td><td class=${v>=0?'g':'r'}>${fmt(v,1,'%')}</td></tr>`).join('')}${[20,50,100,200].map(n=>`<tr><td>${n}-day avg</td><td>${fmt(T.ma[n])}</td></tr>`).join('')}<tr><td>RSI 14</td><td>${fmt(T.rsi,0)} <small>${T.rsi>70?'Overbought: rose fast, vulnerable to a pullback, not a guarantee':T.rsi<30?'Oversold: fell fast, can bounce or keep falling':'Neutral zone'}</small></td></tr><tr><td>MACD hist</td><td>${T.macd?fmt(T.macd.hist,3):U} <small>${T.macd?.hist>0?'Momentum rising':'Momentum fading'}</small></td></tr><tr><td>ATR / vol</td><td>${fmt(T.atr)} (${fmt(T.atrPct,1,'%')}), ${fmt(T.hv,0,'%')}</td></tr><tr><td>Rel volume</td><td>${fmt(T.relVol,1,'x')}</td></tr><tr><td>Support / resist (20d)</td><td>${fmt(T.s20)} / ${fmt(T.r20)}</td></tr><tr><td>Support / resist (60d)</td><td>${fmt(T.s60)} / ${fmt(T.r60)}</td></tr><tr><td>Gap today / 3%+ gaps in 60d</td><td>${fmt(T.gapToday,1,'%')} / ${T.gaps60}</td></tr></table>${spark(d.bars)}`:'<p class=n>Unavailable: no price history</p>'));
@@ -327,7 +194,7 @@ h.push(sec('Squeeze detector',`<p><b>${Q.verdict}</b> (${Q.n} of ${Q.known} meas
 h.push(sec('News',(d.news||[]).length?['fact','analyst','speculation'].map(k=>`<h4>${k}</h4>`+d.news.filter(x=>x.type===k).map(x=>`<p>${esc(x.headline)} <small>${esc(x.source)}, ${x.date}</small></p>`).join('')).join(''):'<p class=n>Unavailable</p>'));
 h.push(sec('Bull / base / bear',`<p class=n>Scenarios need your catalyst and news inputs. Structure: trigger, direction, evidence, uncertainty, invalidation. Filled only from data present: ${d.catalysts?.length?'catalysts loaded':'none loaded'}.</p>`));
 h.push(sec('Trade setups',SU.length?SU.map((s,i)=>`<div class=card><b>Setup ${'ABC'[i]}: ${s.n}</b><br>Why: ${esc(s.why)}<br>Catalyst: ${esc(s.cat||'')}<br>${['confirm','inv','up','down','risk'].filter(k=>s[k]).map(k=>`${{confirm:'Confirms',inv:'Invalidates',up:'Could go right',down:'Could go wrong',risk:'Main risk'}[k]}: ${esc(s[k])}`).join('<br>')}</div>`).join(''):'<p class=n>No setup supported by the loaded data</p>',true));
-h.push(gapsSec(a));h.push(`<div class=card><b>Quick take</b><br>${d.ticker} at ${fmt(T?.price)}. Risk: ${R.score==null?U:R.score+'/100 '+R.level}. Catalyst: ${esc(S._cs[0]?.event||U)}. Volatility ${S.volatility.level}, momentum ${S.momentum.level}. Uncertainty: ${esc(unk)}</div>`);
+h.push(gapsSec(a));h.push(`<div class=card><b>Quick take</b><br>${d.ticker} at ${fmt(T?.price)}. Catalyst: ${esc(S._cs[0]?.event||U)}. Volatility ${S.volatility.level}, momentum ${S.momentum.level}. Uncertainty: ${esc(unk)}</div>`);
 $('#out').innerHTML=h.join('')}
 function spark(b){const c=b.slice(-120).map(x=>x.c),mn=Math.min(...c),mx=Math.max(...c);return`<svg viewBox="0 0 300 60" style="width:100%"><polyline fill="none" stroke="currentColor" stroke-width="1.5" points="${c.map((v,i)=>`${i*300/(c.length-1)},${58-(v-mn)/(mx-mn||1)*56}`).join(' ')}"/></svg>`}
 async function whyUI(){const a=await get($('#t2').value);if(!a)return;const w=why(a.d);$('#out2').innerHTML=w?`<h4>Known facts</h4>${w.fx.map(x=>`<p>${esc(x)}</p>`).join('')}<h4>Likely contributors</h4>${w.lk.map(x=>`<p>${esc(x)}</p>`).join('')||'<p class=n>None documented</p>'}<h4>Unconfirmed speculation</h4>${w.sp.map(x=>`<p class=y>${esc(x)}</p>`).join('')||'<p class=n>None</p>'}`:'<p class=n>Unavailable</p>'}
