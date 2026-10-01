@@ -10,7 +10,6 @@ const CACHE = new Map();
 
 const CACHE_TTL = 60 * 1000;
 const ENRICH_TTL = 5 * 60 * 1000;
-const SESSION_TTL = 20 * 60 * 1000;
 
 let yahooCookie = "";
 let yahooCrumb = "";
@@ -50,6 +49,7 @@ function val(x) {
   }
 
   const n = Number(x);
+
   return Number.isFinite(n) ? n : undefined;
 }
 
@@ -83,31 +83,6 @@ function todayUTC() {
     .slice(0, 10);
 }
 
-function yahooDate(value) {
-  if (value == null) return undefined;
-
-  if (typeof value === "string") {
-    const d = value.slice(0, 10);
-
-    if (/^\d{4}-\d{2}-\d{2}$/.test(d)) {
-      return d;
-    }
-  }
-
-  return dateFromUnix(value);
-}
-
-function unwrapYahooValue(x) {
-  if (x == null) return undefined;
-
-  if (typeof x === "object") {
-    if (x.raw != null) return val(x.raw);
-    if (x.fmt != null) return x.fmt;
-  }
-
-  return val(x);
-}
-
 /* =========================================================
    HTTP
 ========================================================= */
@@ -126,24 +101,37 @@ function httpGet(url, headers = {}, timeout = 15000) {
     const req = https.request(
       {
         hostname: u.hostname,
-        path: u.pathname + u.search,
+
+        path:
+          u.pathname +
+          u.search,
+
         method: "GET",
+
         timeout,
+
         headers: {
           "User-Agent": USER_AGENT,
+
           "Accept":
             "application/json,text/plain,*/*",
+
           "Accept-Language":
             "en-US,en;q=0.9",
+
           "Referer":
             "https://finance.yahoo.com/",
+
           "Origin":
             "https://finance.yahoo.com",
+
           "Connection":
             "keep-alive",
+
           ...headers
         }
       },
+
       res => {
         let body = "";
 
@@ -155,8 +143,12 @@ function httpGet(url, headers = {}, timeout = 15000) {
 
         res.on("end", () => {
           resolve({
-            status: res.statusCode || 0,
-            headers: res.headers,
+            status:
+              res.statusCode || 0,
+
+            headers:
+              res.headers,
+
             body
           });
         });
@@ -164,7 +156,9 @@ function httpGet(url, headers = {}, timeout = 15000) {
     );
 
     req.on("timeout", () => {
-      req.destroy(new Error("Request timeout"));
+      req.destroy(
+        new Error("Request timeout")
+      );
     });
 
     req.on("error", reject);
@@ -184,7 +178,8 @@ async function establishYahooSession(force = false) {
     !force &&
     yahooCookie &&
     yahooCrumb &&
-    now - yahooSessionTime < SESSION_TTL
+    now - yahooSessionTime <
+      20 * 60 * 1000
   ) {
     return true;
   }
@@ -192,14 +187,15 @@ async function establishYahooSession(force = false) {
   let cookie = "";
 
   const cookieHosts = [
-    "https://fc.yahoo.com/",
-    "https://query1.finance.yahoo.com/",
-    "https://query2.finance.yahoo.com/"
+    "https://fc.yahoo.com",
+    "https://query1.finance.yahoo.com",
+    "https://query2.finance.yahoo.com"
   ];
 
   for (const base of cookieHosts) {
     try {
-      const r = await httpGet(base);
+      const r =
+        await httpGet(base + "/");
 
       const setCookie =
         r.headers["set-cookie"];
@@ -208,9 +204,13 @@ async function establishYahooSession(force = false) {
         Array.isArray(setCookie) &&
         setCookie.length
       ) {
-        cookie = setCookie
-          .map(x => x.split(";")[0])
-          .join("; ");
+        const pieces =
+          setCookie.map(
+            x => x.split(";")[0]
+          );
+
+        cookie =
+          pieces.join("; ");
       }
 
       if (cookie) break;
@@ -218,46 +218,56 @@ async function establishYahooSession(force = false) {
   }
 
   if (!cookie) {
-    cookie = yahooCookie || "";
+    cookie =
+      yahooCookie || "";
   }
 
   let crumb = "";
 
-  for (const host of [
+  const crumbHosts = [
     "query1.finance.yahoo.com",
     "query2.finance.yahoo.com"
-  ]) {
+  ];
+
+  for (const host of crumbHosts) {
     try {
-      const r = await httpGet(
-        `https://${host}/v1/test/getcrumb`,
-        cookie
-          ? { Cookie: cookie }
-          : {}
-      );
+      const r =
+        await httpGet(
+          `https://${host}/v1/test/getcrumb`,
+          {
+            Cookie: cookie
+          }
+        );
 
       if (
         r.status === 200 &&
         r.body &&
         !r.body.includes("<")
       ) {
-        crumb = r.body.trim();
+        crumb =
+          r.body.trim();
+
         break;
       }
     } catch (_) {}
   }
 
   if (cookie) {
-    yahooCookie = cookie;
+    yahooCookie =
+      cookie;
   }
 
   if (crumb) {
-    yahooCrumb = crumb;
+    yahooCrumb =
+      crumb;
   }
 
-  yahooSessionTime = now;
+  yahooSessionTime =
+    now;
 
   return Boolean(
-    yahooCookie || yahooCrumb
+    yahooCookie ||
+    yahooCrumb
   );
 }
 
@@ -265,7 +275,8 @@ function yahooHeaders() {
   const headers = {};
 
   if (yahooCookie) {
-    headers.Cookie = yahooCookie;
+    headers.Cookie =
+      yahooCookie;
   }
 
   return headers;
@@ -275,38 +286,26 @@ function yahooHeaders() {
    GENERIC YAHOO JSON
 ========================================================= */
 
-async function yahooJSON(url, retry = true) {
+async function yahooJSON(
+  url,
+  retry = true
+) {
   await establishYahooSession();
 
-  let finalUrl = url;
-
-  /*
-    Yahoo's authenticated endpoints can require the crumb.
-    Add it unless the caller already supplied one.
-  */
-
-  if (
-    yahooCrumb &&
-    !/[?&]crumb=/.test(finalUrl)
-  ) {
-    finalUrl +=
-      (finalUrl.includes("?") ? "&" : "?") +
-      "crumb=" +
-      encodeURIComponent(yahooCrumb);
-  }
-
-  const r = await httpGet(
-    finalUrl,
-    yahooHeaders()
-  );
+  const r =
+    await httpGet(
+      url,
+      yahooHeaders()
+    );
 
   if (
-    (r.status === 401 ||
-      r.status === 403 ||
-      r.status === 429) &&
+    r.status === 429 &&
     retry
   ) {
-    await establishYahooSession(true);
+    await establishYahooSession(
+      true
+    );
+
     await sleep(1200);
 
     return yahooJSON(
@@ -324,14 +323,17 @@ async function yahooJSON(url, retry = true) {
   let j;
 
   try {
-    j = JSON.parse(r.body);
+    j =
+      JSON.parse(r.body);
   } catch {
     throw new Error(
       "Yahoo returned invalid JSON"
     );
   }
 
-  if (j?.finance?.error) {
+  if (
+    j?.finance?.error
+  ) {
     throw new Error(
       j.finance.error.description ||
       "Yahoo finance error"
@@ -341,7 +343,16 @@ async function yahooJSON(url, retry = true) {
   return j;
 }
 
-async function yahooJSONAny(pathname) {
+/*
+  Try both Yahoo query servers.
+  This is important because Yahoo can reject one
+  host while the other still works.
+*/
+
+async function yahooJSONAny(
+  pathname,
+  retry = true
+) {
   const hosts = [
     "query1.finance.yahoo.com",
     "query2.finance.yahoo.com"
@@ -352,7 +363,8 @@ async function yahooJSONAny(pathname) {
   for (const host of hosts) {
     try {
       return await yahooJSON(
-        `https://${host}${pathname}`
+        `https://${host}${pathname}`,
+        retry
       );
     } catch (e) {
       errors.push(
@@ -374,33 +386,61 @@ async function yahooChart(symbol) {
   const errors = [];
 
   const period2 =
-    Math.floor(Date.now() / 1000);
+    Math.floor(
+      Date.now() / 1000
+    );
 
   const period1 =
     period2 -
-    2 * 365 * 24 * 60 * 60;
+    2 *
+      365 *
+      24 *
+      60 *
+      60;
 
-  const p = new URLSearchParams({
-    period1: String(period1),
-    period2: String(period2),
-    interval: "1d",
-    events: "div,splits",
-    includeAdjustedClose: "true"
-  });
+  const p =
+    new URLSearchParams({
+      period1:
+        String(period1),
+
+      period2:
+        String(period2),
+
+      interval:
+        "1d",
+
+      events:
+        "div,splits",
+
+      includeAdjustedClose:
+        "true"
+    });
+
+  if (yahooCrumb) {
+    p.set(
+      "crumb",
+      yahooCrumb
+    );
+  }
 
   for (const host of [
     "query1.finance.yahoo.com",
     "query2.finance.yahoo.com"
   ]) {
     try {
-      const j = await yahooJSON(
-        `https://${host}/v8/finance/chart/${encodeURIComponent(
-          symbol
-        )}?${p}`
-      );
+      const j =
+        await yahooJSON(
+          `https://${host}/v8/finance/chart/${encodeURIComponent(
+            symbol
+          )}?${p}`
+        );
 
-      if (j.chart?.result?.[0]) {
-        return j.chart.result[0];
+      if (
+        j.chart?.result?.[0]
+      ) {
+        return (
+          j.chart.result[0]
+        );
       }
 
       errors.push(
@@ -420,17 +460,22 @@ async function yahooChart(symbol) {
 }
 
 /* =========================================================
-   CONVERT CHART
+   CONVERT YAHOO CHART TO TRADE RADAR
 ========================================================= */
 
-function yahooToTradeRadar(symbol, chart) {
-  const meta = chart.meta || {};
+function yahooToTradeRadar(
+  symbol,
+  chart
+) {
+  const meta =
+    chart.meta || {};
 
   const timestamps =
     chart.timestamp || [];
 
   const q =
-    chart.indicators?.quote?.[0] || {};
+    chart.indicators
+      ?.quote?.[0] || {};
 
   const adj =
     chart.indicators
@@ -444,17 +489,39 @@ function yahooToTradeRadar(symbol, chart) {
     i < timestamps.length;
     i++
   ) {
+    /*
+      IMPORTANT:
+      Use regular close before adjusted close.
+
+      Mixing adjusted close with regular
+      OHLC values can create impossible
+      OHLC combinations and trigger TR-105.
+    */
+
     const c =
       q.close?.[i] ??
       adj[i];
 
-    const o = q.open?.[i];
-    const h = q.high?.[i];
-    const l = q.low?.[i];
-    const v = q.volume?.[i];
+    const o =
+      q.open?.[i];
+
+    const h =
+      q.high?.[i];
+
+    const l =
+      q.low?.[i];
+
+    const v =
+      q.volume?.[i];
 
     if (
-      [o, h, l, c, v].every(
+      [
+        o,
+        h,
+        l,
+        c,
+        v
+      ].every(
         x =>
           Number.isFinite(
             Number(x)
@@ -462,17 +529,24 @@ function yahooToTradeRadar(symbol, chart) {
       )
     ) {
       const bar = {
-        d: new Date(
-          timestamps[i] * 1000
-        )
-          .toISOString()
-          .slice(0, 10),
+        d:
+          new Date(
+            timestamps[i] *
+              1000
+          )
+            .toISOString()
+            .slice(0, 10),
+
         o: +o,
         h: +h,
         l: +l,
         c: +c,
         v: +v
       };
+
+      /*
+        Basic OHLC safety validation.
+      */
 
       if (
         bar.h >=
@@ -498,98 +572,155 @@ function yahooToTradeRadar(symbol, chart) {
     );
   }
 
-  const price = firstDefined(
-    val(meta.regularMarketPrice),
-    val(meta.postMarketPrice),
-    val(meta.previousClose),
-    bars.at(-1).c
-  );
+  const price =
+    firstDefined(
+      val(
+        meta.regularMarketPrice
+      ),
+      val(
+        meta.postMarketPrice
+      ),
+      val(
+        meta.previousClose
+      ),
+      bars.at(-1).c
+    );
 
   return {
-    ticker: symbol,
-    symbol,
+    ticker:
+      symbol,
+
+    symbol:
+      symbol,
+
     name:
       meta.longName ||
       meta.shortName ||
       symbol,
 
-    asof: bars.at(-1).d,
+    asof:
+      bars.at(-1).d,
 
-    sector: undefined,
-    industry: undefined,
+    sector:
+      undefined,
+
+    industry:
+      undefined,
 
     provenance: {
       quote: {
-        source: "Yahoo Finance",
-        ts: new Date().toISOString()
+        source:
+          "Yahoo Finance",
+
+        ts:
+          new Date().toISOString()
       },
 
       bars: {
         source:
           "Yahoo Finance chart",
-        ts: new Date().toISOString()
+
+        ts:
+          new Date().toISOString()
       }
     },
 
     quote: {
       price,
-      source: "Yahoo Finance"
+      source:
+        "Yahoo Finance"
     },
 
     bars,
 
     fundamentals: {
-      marketCap: undefined,
-      sharesOut: undefined,
-      floatShares: undefined,
-      high52: undefined,
-      low52: undefined,
-      beta: undefined,
-      shortPctFloat: undefined,
-      daysToCover: undefined,
-      analystTarget: undefined,
-      instOwnPct: undefined,
-      pe: undefined,
-      forwardPE: undefined,
-      eps: undefined,
-      revenueGrowth: undefined,
-      profitMargin: undefined,
-      analystConsensus: undefined
+      marketCap:
+        undefined,
+
+      sharesOut:
+        undefined,
+
+      floatShares:
+        undefined,
+
+      high52:
+        undefined,
+
+      low52:
+        undefined,
+
+      beta:
+        undefined,
+
+      shortPctFloat:
+        undefined,
+
+      daysToCover:
+        undefined,
+
+      analystTarget:
+        undefined,
+
+      instOwnPct:
+        undefined,
+
+      pe:
+        undefined,
+
+      forwardPE:
+        undefined,
+
+      eps:
+        undefined,
+
+      revenueGrowth:
+        undefined,
+
+      profitMargin:
+        undefined,
+
+      analystConsensus:
+        undefined
     },
 
-    earnings: undefined,
-    options: undefined,
-    catalysts: [],
-    news: [],
-    social: undefined
+    earnings:
+      undefined,
+
+    options:
+      undefined,
+
+    catalysts:
+      [],
+
+    news:
+      [],
+
+    social:
+      undefined
   };
 }
 
 /* =========================================================
-   ENRICHMENT STATUS
+   DATE HELPERS
 ========================================================= */
 
-function setEnrichment(
-  data,
-  name,
-  ok,
-  hasData,
-  error
-) {
-  data.enrichment[name] = {
-    ok,
-    hasData,
-    ...(error
-      ? { error: String(error).slice(0, 700) }
-      : {})
-  };
-
-  if (error) {
-    data.enrichment.errors.push({
-      source: name,
-      error: String(error).slice(0, 700)
-    });
+function firstDate(x) {
+  if (
+    !Array.isArray(x)
+  ) {
+    return undefined;
   }
+
+  for (const v of x) {
+    const date =
+      dateFromUnix(v);
+
+    if (date) {
+      return date;
+    }
+  }
+
+  return undefined;
 }
 
 /* =========================================================
@@ -601,11 +732,15 @@ async function enrichQuote(
   data
 ) {
   try {
-    const j = await yahooJSONAny(
+    const pathname =
       `/v7/finance/quote?symbols=${encodeURIComponent(
         symbol
-      )}`
-    );
+      )}`;
+
+    const j =
+      await yahooJSONAny(
+        pathname
+      );
 
     const q =
       j.quoteResponse
@@ -633,88 +768,127 @@ async function enrichQuote(
       q.industry ||
       data.industry;
 
-    const marketPrice =
+    if (
       val(
         q.regularMarketPrice
-      );
-
-    if (marketPrice != null) {
+      ) != null
+    ) {
       data.quote.price =
-        marketPrice;
+        val(
+          q.regularMarketPrice
+        );
     }
 
-    Object.assign(f, {
-      marketCap: firstDefined(
-        val(q.marketCap),
-        f.marketCap
-      ),
+    Object.assign(
+      f,
+      {
+        marketCap:
+          firstDefined(
+            val(q.marketCap),
+            f.marketCap
+          ),
 
-      sharesOut: firstDefined(
-        val(q.sharesOutstanding),
-        f.sharesOut
-      ),
+        sharesOut:
+          firstDefined(
+            val(
+              q.sharesOutstanding
+            ),
+            f.sharesOut
+          ),
 
-      floatShares: firstDefined(
-        val(q.floatShares),
-        f.floatShares
-      ),
+        floatShares:
+          firstDefined(
+            val(
+              q.floatShares
+            ),
+            f.floatShares
+          ),
 
-      high52: firstDefined(
-        val(q.fiftyTwoWeekHigh),
-        f.high52
-      ),
+        high52:
+          firstDefined(
+            val(
+              q.fiftyTwoWeekHigh
+            ),
+            f.high52
+          ),
 
-      low52: firstDefined(
-        val(q.fiftyTwoWeekLow),
-        f.low52
-      ),
+        low52:
+          firstDefined(
+            val(
+              q.fiftyTwoWeekLow
+            ),
+            f.low52
+          ),
 
-      beta: firstDefined(
-        val(q.beta),
-        f.beta
-      ),
+        beta:
+          firstDefined(
+            val(q.beta),
+            f.beta
+          ),
 
-      shortPctFloat:
-        val(q.shortPercentOfFloat) != null
-          ? val(q.shortPercentOfFloat) * 100
-          : f.shortPctFloat,
+        shortPctFloat:
+          val(
+            q.shortPercentOfFloat
+          ) != null
+            ? val(
+                q.shortPercentOfFloat
+              ) * 100
+            : f.shortPctFloat,
 
-      daysToCover: firstDefined(
-        val(q.shortRatio),
-        f.daysToCover
-      ),
+        daysToCover:
+          firstDefined(
+            val(
+              q.shortRatio
+            ),
+            f.daysToCover
+          ),
 
-      analystTarget: firstDefined(
-        val(q.targetMeanPrice),
-        f.analystTarget
-      ),
+        analystTarget:
+          firstDefined(
+            val(
+              q.targetMeanPrice
+            ),
+            f.analystTarget
+          ),
 
-      instOwnPct:
-        val(q.heldPercentInstitutions) != null
-          ? val(q.heldPercentInstitutions) * 100
-          : f.instOwnPct,
+        instOwnPct:
+          val(
+            q.heldPercentInstitutions
+          ) != null
+            ? val(
+                q.heldPercentInstitutions
+              ) * 100
+            : f.instOwnPct,
 
-      pe: firstDefined(
-        val(q.trailingPE),
-        f.pe
-      ),
+        pe:
+          firstDefined(
+            val(q.trailingPE),
+            f.pe
+          ),
 
-      forwardPE: firstDefined(
-        val(q.forwardPE),
-        f.forwardPE
-      ),
+        forwardPE:
+          firstDefined(
+            val(q.forwardPE),
+            f.forwardPE
+          ),
 
-      eps: firstDefined(
-        val(q.epsTrailingTwelveMonths),
-        f.eps
-      )
-    });
+        eps:
+          firstDefined(
+            val(
+              q.epsTrailingTwelveMonths
+            ),
+            f.eps
+          )
+      }
+    );
 
     if (
       val(q.dividendYield) != null
     ) {
       f.dividendYield =
-        val(q.dividendYield) * 100;
+        val(
+          q.dividendYield
+        ) * 100;
     }
 
     if (
@@ -724,29 +898,50 @@ async function enrichQuote(
     ) {
       data.analyst = {
         targetMean:
-          val(q.targetMeanPrice),
+          val(
+            q.targetMeanPrice
+          ),
+
         targetHigh:
-          val(q.targetHighPrice),
+          val(
+            q.targetHighPrice
+          ),
+
         targetLow:
-          val(q.targetLowPrice)
+          val(
+            q.targetLowPrice
+          )
       };
     }
 
-    setEnrichment(
-      data,
-      "quote",
-      true,
-      true
-    );
+    data.enrichment.quote =
+      {
+        ok: true,
+        hasData: true
+      };
 
   } catch (e) {
-    setEnrichment(
-      data,
-      "quote",
-      false,
-      false,
-      e.message
-    );
+    data.enrichment.quote =
+      {
+        ok: false,
+        hasData: false,
+        error:
+          String(
+            e?.message ||
+            e
+          ).slice(
+            0,
+            500
+          )
+      };
+
+    data.enrichment.errors.push({
+      source:
+        "quote",
+      error:
+        data.enrichment
+          .quote.error
+    });
   }
 }
 
@@ -758,362 +953,321 @@ async function enrichCalendar(
   symbol,
   data
 ) {
-  const moduleSets = [
-    [
-      "calendarEvents",
-      "price",
-      "earningsTrend",
-      "defaultKeyStatistics",
-      "financialData"
-    ],
+  try {
+    const modules =
+      [
+        "calendarEvents",
+        "price",
+        "earningsTrend",
+        "defaultKeyStatistics",
+        "financialData"
+      ].join(",");
 
-    [
-      "calendarEvents",
-      "earningsTrend",
-      "defaultKeyStatistics"
-    ],
+    const pathname =
+      `/v10/finance/quoteSummary/${encodeURIComponent(
+        symbol
+      )}?modules=${encodeURIComponent(
+        modules
+      )}`;
 
-    [
-      "calendarEvents"
-    ]
-  ];
+    const j =
+      await yahooJSONAny(
+        pathname
+      );
 
-  let lastError;
+    const r =
+      j.quoteSummary
+        ?.result?.[0];
 
-  for (
-    const modules of moduleSets
-  ) {
-    try {
-      const pathname =
-        `/v10/finance/quoteSummary/${encodeURIComponent(
-          symbol
-        )}?modules=${encodeURIComponent(
-          modules.join(",")
-        )}`;
+    if (!r) {
+      throw new Error(
+        "Yahoo quoteSummary returned no result"
+      );
+    }
 
-      const j =
-        await yahooJSONAny(
-          pathname
-        );
+    const f =
+      data.fundamentals;
 
-      const r =
-        j.quoteSummary
-          ?.result?.[0];
+    const d =
+      r.defaultKeyStatistics ||
+      {};
 
-      if (!r) {
-        throw new Error(
-          "Yahoo quoteSummary returned no result"
-        );
-      }
+    const fin =
+      r.financialData ||
+      {};
 
-      const f =
-        data.fundamentals;
+    const cal =
+      r.calendarEvents ||
+      {};
 
-      const d =
-        r.defaultKeyStatistics || {};
+    /*
+      Fill fundamental data from quoteSummary
+      when quote endpoint doesn't provide it.
+    */
 
-      const fin =
-        r.financialData || {};
+    f.marketCap =
+      firstDefined(
+        val(fin.marketCap),
+        f.marketCap
+      );
 
-      const cal =
-        r.calendarEvents || {};
+    f.sharesOut =
+      firstDefined(
+        val(
+          d.sharesOutstanding
+        ),
+        f.sharesOut
+      );
 
-      f.marketCap =
-        firstDefined(
-          unwrapYahooValue(
-            fin.marketCap
-          ),
-          f.marketCap
-        );
+    f.floatShares =
+      firstDefined(
+        val(
+          d.floatShares
+        ),
+        f.floatShares
+      );
 
-      f.sharesOut =
-        firstDefined(
-          unwrapYahooValue(
-            d.sharesOutstanding
-          ),
-          f.sharesOut
-        );
+    if (
+      val(
+        d.shortPercentOfFloat
+      ) != null
+    ) {
+      f.shortPctFloat =
+        val(
+          d.shortPercentOfFloat
+        ) * 100;
+    }
 
-      f.floatShares =
-        firstDefined(
-          unwrapYahooValue(
-            d.floatShares
-          ),
-          f.floatShares
-        );
+    f.daysToCover =
+      firstDefined(
+        val(d.shortRatio),
+        f.daysToCover
+      );
 
-      const shortPct =
-        firstDefined(
-          unwrapYahooValue(
-            d.shortPercentOfFloat
-          ),
-          unwrapYahooValue(
-            d.shortPercentOfSharesOutstanding
-          )
-        );
+    f.analystTarget =
+      firstDefined(
+        val(
+          fin.targetMeanPrice
+        ),
+        f.analystTarget
+      );
 
-      if (shortPct != null) {
-        /*
-          Yahoo normally supplies this as a decimal.
-        */
+    f.beta =
+      firstDefined(
+        val(d.beta),
+        f.beta
+      );
 
-        f.shortPctFloat =
-          shortPct <= 1
-            ? shortPct * 100
-            : shortPct;
-      }
+    f.pe =
+      firstDefined(
+        val(d.trailingPE),
+        f.pe
+      );
 
-      f.daysToCover =
-        firstDefined(
-          unwrapYahooValue(
-            d.shortRatio
-          ),
-          f.daysToCover
-        );
+    f.forwardPE =
+      firstDefined(
+        val(d.forwardPE),
+        f.forwardPE
+      );
 
-      f.analystTarget =
-        firstDefined(
-          unwrapYahooValue(
-            fin.targetMeanPrice
-          ),
-          f.analystTarget
-        );
+    f.eps =
+      firstDefined(
+        val(
+          fin.epsTrailingTwelveMonths
+        ),
+        f.eps
+      );
 
-      f.beta =
-        firstDefined(
-          unwrapYahooValue(d.beta),
-          f.beta
-        );
-
-      f.pe =
-        firstDefined(
-          unwrapYahooValue(
-            d.trailingPE
-          ),
-          f.pe
-        );
-
-      f.forwardPE =
-        firstDefined(
-          unwrapYahooValue(
-            d.forwardPE
-          ),
-          f.forwardPE
-        );
-
-      f.eps =
-        firstDefined(
-          unwrapYahooValue(
-            fin.epsTrailingTwelveMonths
-          ),
-          f.eps
-        );
-
-      if (
-        unwrapYahooValue(
+    if (
+      val(fin.revenueGrowth) !=
+      null
+    ) {
+      f.revenueGrowth =
+        val(
           fin.revenueGrowth
-        ) != null
-      ) {
-        f.revenueGrowth =
-          unwrapYahooValue(
-            fin.revenueGrowth
-          ) * 100;
-      }
+        ) * 100;
+    }
 
-      if (
-        unwrapYahooValue(
+    if (
+      val(fin.profitMargins) !=
+      null
+    ) {
+      f.profitMargin =
+        val(
           fin.profitMargins
-        ) != null
-      ) {
-        f.profitMargin =
-          unwrapYahooValue(
-            fin.profitMargins
-          ) * 100;
-      }
+        ) * 100;
+    }
 
-      if (
-        unwrapYahooValue(
+    if (
+      val(
+        d.heldPercentInstitutions
+      ) != null
+    ) {
+      f.instOwnPct =
+        val(
           d.heldPercentInstitutions
-        ) != null
-      ) {
-        f.instOwnPct =
-          unwrapYahooValue(
-            d.heldPercentInstitutions
-          ) * 100;
-      }
+        ) * 100;
+    }
 
-      /*
-        Earnings date.
-        Yahoo has returned several shapes over time,
-        so check all common forms.
-      */
+    /*
+      Earnings date.
+    */
 
-      let earningsDate;
+    const ed =
+      firstDate(
+        cal.earnings
+          ?.earningsDate
+      );
 
-      const earnings =
-        cal.earnings;
+    if (ed) {
+      data.earnings = {
+        ...(data.earnings || {}),
 
-      if (earnings) {
-        earningsDate =
-          firstDateFromArray(
-            earnings.earningsDate
-          ) ||
-          yahooDate(
-            earnings.earningsDate
-          );
-      }
+        date:
+          ed,
 
-      if (!earningsDate) {
-        earningsDate =
-          firstDateFromArray(
-            cal.earningsDate
-          ) ||
-          yahooDate(
-            cal.earningsDate
-          );
-      }
+        source:
+          "Yahoo Finance"
+      };
+    }
 
-      if (earningsDate) {
-        data.earnings = {
-          ...(data.earnings || {}),
-          date: earningsDate,
-          source:
-            "Yahoo Finance"
-        };
-      }
+    /*
+      Earnings call time.
+    */
 
-      /*
-        Earnings call time.
-      */
+    const callTime =
+      cal.earnings
+        ?.earningsCallTime;
 
-      const callTime =
-        earnings?.earningsCallTime;
+    if (
+      data.earnings &&
+      callTime
+    ) {
+      data.earnings.callTime =
+        callTime.fmt ||
+        callTime.raw ||
+        undefined;
+    }
 
-      if (
-        data.earnings &&
-        callTime
-      ) {
-        data.earnings.callTime =
-          callTime.fmt ||
-          callTime.raw ||
-          callTime;
-      }
+    /*
+      EPS estimate.
+    */
 
-      /*
-        EPS estimate.
-      */
+    const trend =
+      r.earningsTrend
+        ?.trend;
 
-      const trend =
-        r.earningsTrend?.trend;
+    const near =
+      Array.isArray(trend)
+        ? (
+            trend.find(
+              x =>
+                x.period ===
+                "0q"
+            ) ||
+            trend[0]
+          )
+        : null;
 
-      if (Array.isArray(trend)) {
-        const near =
-          trend.find(
-            x =>
-              x.period === "0q"
-          ) ||
-          trend.find(
-            x =>
-              x.period === "+1q"
-          ) ||
-          trend[0];
+    if (
+      near
+        ?.earningsEstimate
+        ?.avg
+        ?.raw != null
+    ) {
+      data.earnings =
+        data.earnings || {};
 
-        const estimate =
-          unwrapYahooValue(
-            near
-              ?.earningsEstimate
-              ?.avg
-          );
+      data.earnings.estimate =
+        val(
+          near
+            .earningsEstimate
+            .avg
+        );
+    }
 
-        if (estimate != null) {
-          data.earnings =
-            data.earnings || {};
+    /*
+      Add earnings catalyst.
+    */
 
-          data.earnings.estimate =
-            estimate;
-        }
-      }
-
-      /*
-        Earnings catalyst.
-      */
-
-      if (
-        data.earnings?.date
-      ) {
-        const exists =
-          data.catalysts.some(
+    if (
+      data.earnings?.date
+    ) {
+      const existing =
+        data.catalysts
+          .some(
             x =>
               x.event ===
               "Earnings"
           );
 
-        if (!exists) {
-          data.catalysts.push({
-            event: "Earnings",
-            date:
-              data.earnings.date,
-            impact: "High",
-            why:
-              "Quarterly results and guidance can materially change expectations.",
-            up:
-              "Beat and/or stronger guidance",
-            down:
-              "Miss and/or weaker guidance",
-            confidence: "Medium",
-            source:
-              "Yahoo Finance"
-          });
-        }
+      if (!existing) {
+        data.catalysts.push({
+          event:
+            "Earnings",
+
+          date:
+            data.earnings.date,
+
+          impact:
+            "High",
+
+          why:
+            "Quarterly results and guidance can materially change expectations.",
+
+          up:
+            "Beat and/or stronger guidance",
+
+          down:
+            "Miss and/or weaker guidance",
+
+          confidence:
+            "Medium",
+
+          source:
+            "Yahoo Finance"
+        });
       }
-
-      const hasFundamentals =
-        Object.values(f).some(
-          x =>
-            x !== undefined &&
-            x !== null
-        );
-
-      setEnrichment(
-        data,
-        "calendar",
-        true,
-        Boolean(
-          data.earnings ||
-          hasFundamentals
-        )
-      );
-
-      return;
-
-    } catch (e) {
-      lastError = e;
     }
+
+    data.enrichment.calendar =
+      {
+        ok: true,
+
+        hasData:
+          !!data.earnings ||
+          Object.values(f).some(
+            x =>
+              x !== undefined &&
+              x !== null
+          )
+      };
+
+  } catch (e) {
+    data.enrichment.calendar =
+      {
+        ok: false,
+
+        hasData: false,
+
+        error:
+          String(
+            e?.message ||
+            e
+          ).slice(
+            0,
+            500
+          )
+      };
+
+    data.enrichment.errors.push({
+      source:
+        "calendar",
+      error:
+        data.enrichment
+          .calendar.error
+    });
   }
-
-  setEnrichment(
-    data,
-    "calendar",
-    false,
-    false,
-    lastError?.message ||
-      "Yahoo earnings endpoint failed"
-  );
-}
-
-function firstDateFromArray(x) {
-  if (!Array.isArray(x)) {
-    return undefined;
-  }
-
-  for (const value of x) {
-    const d =
-      yahooDate(value);
-
-    if (d) return d;
-  }
-
-  return undefined;
 }
 
 /* =========================================================
@@ -1125,15 +1279,18 @@ async function enrichOptions(
   data
 ) {
   try {
-    const first =
+    const pathname =
+      `/v7/finance/options/${encodeURIComponent(
+        symbol
+      )}`;
+
+    const j =
       await yahooJSONAny(
-        `/v7/finance/options/${encodeURIComponent(
-          symbol
-        )}`
+        pathname
       );
 
     const r =
-      first.optionChain
+      j.optionChain
         ?.result?.[0];
 
     if (!r) {
@@ -1143,13 +1300,17 @@ async function enrichOptions(
     }
 
     const expirations =
-      (r.expirationDates || [])
+      (
+        r.expirationDates ||
+        []
+      )
         .map(Number)
         .filter(
           Number.isFinite
         )
         .sort(
-          (a, b) => a - b
+          (a, b) =>
+            a - b
         );
 
     const now =
@@ -1159,7 +1320,8 @@ async function enrichOptions(
 
     const exp =
       expirations.find(
-        x => x >= now
+        x =>
+          x >= now
       );
 
     if (!exp) {
@@ -1168,15 +1330,18 @@ async function enrichOptions(
       );
     }
 
-    const second =
+    const pathname2 =
+      `/v7/finance/options/${encodeURIComponent(
+        symbol
+      )}?date=${exp}`;
+
+    const j2 =
       await yahooJSONAny(
-        `/v7/finance/options/${encodeURIComponent(
-          symbol
-        )}?date=${exp}`
+        pathname2
       );
 
     const x =
-      second.optionChain
+      j2.optionChain
         ?.result?.[0];
 
     if (!x) {
@@ -1186,29 +1351,36 @@ async function enrichOptions(
     }
 
     const calls =
-      x.options?.[0]?.calls ||
-      [];
+      x.options?.[0]
+        ?.calls || [];
 
     const puts =
-      x.options?.[0]?.puts ||
-      [];
+      x.options?.[0]
+        ?.puts || [];
 
-    const sum = (
-      arr,
-      key
-    ) =>
-      arr.reduce(
-        (total, item) =>
-          total +
-          (val(item[key]) || 0),
-        0
-      );
+    const sum =
+      (arr, key) =>
+        arr.reduce(
+          (total, item) =>
+            total +
+            (
+              val(item[key]) ||
+              0
+            ),
+          0
+        );
 
     const callVol =
-      sum(calls, "volume");
+      sum(
+        calls,
+        "volume"
+      );
 
     const putVol =
-      sum(puts, "volume");
+      sum(
+        puts,
+        "volume"
+      );
 
     const callOI =
       sum(
@@ -1223,9 +1395,13 @@ async function enrichOptions(
       );
 
     const price =
-      Number(data.quote?.price);
+      data.quote.price;
 
-    function nearestIV(
+    /*
+      Find contracts closest to the current price.
+    */
+
+    function closestIV(
       arr
     ) {
       return arr
@@ -1234,20 +1410,29 @@ async function enrichOptions(
             val(
               z.impliedVolatility
             ) != null &&
-            val(z.strike) != null
+            val(
+              z.strike
+            ) != null
         )
         .sort(
           (a, b) =>
             Math.abs(
-              val(a.strike) -
-              price
+              val(
+                a.strike
+              ) -
+                price
             ) -
             Math.abs(
-              val(b.strike) -
-              price
+              val(
+                b.strike
+              ) -
+                price
             )
         )
-        .slice(0, 3)
+        .slice(
+          0,
+          3
+        )
         .map(
           z =>
             val(
@@ -1257,17 +1442,22 @@ async function enrichOptions(
     }
 
     const ivs =
-      nearestIV(calls)
-        .concat(
-          nearestIV(puts)
-        );
+      closestIV(
+        calls
+      ).concat(
+        closestIV(
+          puts
+        )
+      );
 
     const iv =
       ivs.length
         ? ivs.reduce(
-            (a, b) => a + b,
+            (a, b) =>
+              a + b,
             0
-          ) / ivs.length
+          ) /
+          ivs.length
         : undefined;
 
     const days =
@@ -1286,13 +1476,22 @@ async function enrichOptions(
           100
         : undefined;
 
+    /*
+      We deliberately do NOT invent volVsAvg.
+      Yahoo's single option chain does not provide
+      a trustworthy historical options-volume baseline.
+    */
+
     data.options = {
-      available: true,
+      available:
+        true,
 
       callVol,
+
       putVol,
 
       callOI,
+
       putOI,
 
       openInterest:
@@ -1300,15 +1499,9 @@ async function enrichOptions(
 
       putCall:
         callVol > 0
-          ? putVol / callVol
+          ? putVol /
+            callVol
           : undefined,
-
-      /*
-        Intentionally undefined.
-        Yahoo does not provide a reliable
-        historical options-volume baseline
-        in this endpoint.
-      */
 
       volVsAvg:
         undefined,
@@ -1325,32 +1518,51 @@ async function enrichOptions(
           exp * 1000
         )
           .toISOString()
-          .slice(0, 10)
+          .slice(
+            0,
+            10
+          )
     };
 
     if (
       data.earnings &&
       expectedMovePct != null
     ) {
-      data.earnings.expectedMovePct =
+      data.earnings
+        .expectedMovePct =
         expectedMovePct;
     }
 
-    setEnrichment(
-      data,
-      "options",
-      true,
-      true
-    );
+    data.enrichment.options =
+      {
+        ok: true,
+        hasData: true
+      };
 
   } catch (e) {
-    setEnrichment(
-      data,
-      "options",
-      false,
-      false,
-      e.message
-    );
+    data.enrichment.options =
+      {
+        ok: false,
+
+        hasData: false,
+
+        error:
+          String(
+            e?.message ||
+            e
+          ).slice(
+            0,
+            500
+          )
+      };
+
+    data.enrichment.errors.push({
+      source:
+        "options",
+      error:
+        data.enrichment
+          .options.error
+    });
   }
 }
 
@@ -1406,12 +1618,14 @@ function sentimentFromHeadline(
 
   const p =
     pos.filter(
-      w => s.includes(w)
+      w =>
+        s.includes(w)
     ).length;
 
   const n =
     neg.filter(
-      w => s.includes(w)
+      w =>
+        s.includes(w)
     ).length;
 
   return p > n
@@ -1459,15 +1673,20 @@ async function enrichNews(
   data
 ) {
   try {
+    const pathname =
+      `/v1/finance/search?q=${encodeURIComponent(
+        symbol
+      )}&newsCount=12&quotesCount=0`;
+
     const j =
       await yahooJSONAny(
-        `/v1/finance/search?q=${encodeURIComponent(
-          symbol
-        )}&newsCount=12&quotesCount=0`
+        pathname
       );
 
     const rows =
-      Array.isArray(j.news)
+      Array.isArray(
+        j.news
+      )
         ? j.news
         : [];
 
@@ -1480,9 +1699,11 @@ async function enrichNews(
             "";
 
           const date =
-            dateFromUnix(
-              x.providerPublishTime
-            );
+            x.providerPublishTime
+              ? dateFromUnix(
+                  x.providerPublishTime
+                )
+              : undefined;
 
           return {
             headline,
@@ -1505,7 +1726,8 @@ async function enrichNews(
 
             url:
               x.link ||
-              x.canonicalUrl?.url
+              x.canonicalUrl
+                ?.url
           };
         })
         .filter(
@@ -1514,37 +1736,55 @@ async function enrichNews(
             x.date
         );
 
+    /*
+      Turn clearly dated, relevant news into
+      catalysts. We only do this when the
+      headline itself contains a recognizable
+      event. We do not pretend every headline
+      is a catalyst.
+    */
+
     for (
-      const item of data.news
+      const item of
+      data.news
     ) {
       const s =
-        item.headline.toLowerCase();
+        item.headline
+          .toLowerCase();
 
       const isCatalyst =
         /earnings|guidance|acquisition|acquire|merger|approval|contract|partnership|lawsuit|investigation|launch|product|recall|buyback|dividend|analyst|upgrade|downgrade/.test(
           s
         );
 
-      if (!isCatalyst) continue;
+      if (!isCatalyst) {
+        continue;
+      }
 
-      const exists =
-        data.catalysts.some(
-          c =>
-            c.date === item.date &&
-            c.event ===
-              item.headline
-        );
+      const already =
+        data.catalysts
+          .some(
+            c =>
+              c.date ===
+                item.date &&
+              c.event ===
+                item.headline
+          );
 
-      if (exists) continue;
+      if (already) {
+        continue;
+      }
 
-      let impact = "Medium";
+      let impact =
+        "Medium";
 
       if (
         /earnings|merger|acquisition|approval|investigation|lawsuit/.test(
           s
         )
       ) {
-        impact = "High";
+        impact =
+          "High";
       }
 
       data.catalysts.push({
@@ -1577,180 +1817,40 @@ async function enrichNews(
       });
     }
 
-    setEnrichment(
-      data,
-      "news",
-      true,
-      data.news.length > 0
-    );
+    data.enrichment.news =
+      {
+        ok: true,
+
+        hasData:
+          data.news.length >
+          0
+      };
 
   } catch (e) {
-    setEnrichment(
-      data,
-      "news",
-      false,
-      false,
-      e.message
-    );
+    data.enrichment.news =
+      {
+        ok: false,
+
+        hasData: false,
+
+        error:
+          String(
+            e?.message ||
+            e
+          ).slice(
+            0,
+            500
+          )
+      };
+
+    data.enrichment.errors.push({
+      source:
+        "news",
+      error:
+        data.enrichment
+          .news.error
+    });
   }
-}
-
-/* =========================================================
-   EVENT RISK
-========================================================= */
-
-function calculateEventRisk(data) {
-  const today =
-    new Date(
-      `${todayUTC()}T00:00:00Z`
-    );
-
-  const events = [];
-
-  if (
-    data.earnings?.date
-  ) {
-    const d =
-      new Date(
-        `${data.earnings.date}T00:00:00Z`
-      );
-
-    if (
-      !Number.isNaN(
-        d.getTime()
-      )
-    ) {
-      const days =
-        Math.round(
-          (
-            d - today
-          ) /
-          86400000
-        );
-
-      if (days >= 0) {
-        events.push({
-          type: "Earnings",
-          date:
-            data.earnings.date,
-          days
-        });
-      }
-    }
-  }
-
-  for (
-    const c of
-    data.catalysts || []
-  ) {
-    if (!c.date) continue;
-
-    const d =
-      new Date(
-        `${c.date}T00:00:00Z`
-      );
-
-    if (
-      Number.isNaN(
-        d.getTime()
-      )
-    ) {
-      continue;
-    }
-
-    const days =
-      Math.round(
-        (d - today) /
-        86400000
-      );
-
-    if (days >= 0) {
-      events.push({
-        type:
-          c.event || "Catalyst",
-        date: c.date,
-        days,
-        impact:
-          c.impact || "Medium"
-      });
-    }
-  }
-
-  events.sort(
-    (a, b) =>
-      a.days - b.days
-  );
-
-  const next =
-    events[0];
-
-  if (!next) {
-    return {
-      level: "Unavailable",
-      score: null,
-      why:
-        "No dated upcoming earnings or catalysts were supplied.",
-      nextEvent: null
-    };
-  }
-
-  let score = 20;
-
-  if (next.days <= 3) {
-    score = 95;
-  } else if (next.days <= 7) {
-    score = 85;
-  } else if (next.days <= 14) {
-    score = 70;
-  } else if (next.days <= 30) {
-    score = 50;
-  } else if (next.days <= 60) {
-    score = 30;
-  }
-
-  if (
-    next.type === "Earnings"
-  ) {
-    score =
-      Math.min(
-        100,
-        score + 5
-      );
-  }
-
-  if (
-    next.impact === "High"
-  ) {
-    score =
-      Math.min(
-        100,
-        score + 10
-      );
-  }
-
-  let level;
-
-  if (score >= 80) {
-    level = "Extreme";
-  } else if (score >= 60) {
-    level = "High";
-  } else if (score >= 35) {
-    level = "Medium";
-  } else {
-    level = "Low";
-  }
-
-  return {
-    level,
-    score,
-    why:
-      `${next.type} is ${next.days} day${
-        next.days === 1
-          ? ""
-          : "s"
-      } away (${next.date}).`,
-    nextEvent: next
-  };
 }
 
 /* =========================================================
@@ -1800,92 +1900,131 @@ async function enrich(
     errors: []
   };
 
+  /*
+    IMPORTANT:
+    Run these sequentially rather than
+    Promise.allSettled().
+
+    This greatly reduces the chance of
+    Yahoo rate-limiting Render.
+  */
+
   await enrichQuote(
     symbol,
     data
   );
 
-  await sleep(300);
+  await sleep(250);
 
   await enrichCalendar(
     symbol,
     data
   );
 
-  await sleep(300);
+  await sleep(250);
 
   await enrichOptions(
     symbol,
     data
   );
 
-  await sleep(300);
+  await sleep(250);
 
   await enrichNews(
     symbol,
     data
   );
 
+  /*
+    Earnings expected move.
+  */
+
   if (
-    data.options?.expectedMovePct != null &&
+    data.options
+      ?.expectedMovePct !=
+      null &&
     data.earnings
   ) {
-    data.earnings.expectedMovePct =
-      data.options.expectedMovePct;
+    data.earnings
+      .expectedMovePct =
+      data.options
+        .expectedMovePct;
   }
 
-  data.eventRisk =
-    calculateEventRisk(
-      data
-    );
+  /*
+    Provenance is only claimed when the
+    corresponding data actually exists.
+  */
 
   if (
-    data.enrichment.quote.hasData ||
-    data.enrichment.calendar.hasData
+    data.enrichment.quote
+      ?.hasData ||
+    data.enrichment.calendar
+      ?.hasData
   ) {
-    data.provenance.fundamentals = {
-      source:
-        "Yahoo Finance quote/quoteSummary",
-      ts:
-        new Date().toISOString()
-    };
-  }
+    data.provenance
+      .fundamentals = {
+        source:
+          "Yahoo Finance quote/quoteSummary",
 
-  if (data.earnings) {
-    data.provenance.earnings = {
-      source:
-        "Yahoo Finance calendarEvents",
-      ts:
-        new Date().toISOString()
-    };
-  }
-
-  if (data.options) {
-    data.provenance.options = {
-      source:
-        "Yahoo Finance option chain",
-      ts:
-        new Date().toISOString()
-    };
+        ts:
+          new Date().toISOString()
+      };
   }
 
   if (
-    Array.isArray(data.news) &&
+    data.earnings
+  ) {
+    data.provenance
+      .earnings = {
+        source:
+          "Yahoo Finance calendarEvents",
+
+        ts:
+          new Date().toISOString()
+      };
+  }
+
+  if (
+    data.options
+  ) {
+    data.provenance
+      .options = {
+        source:
+          "Yahoo Finance option chain",
+
+        ts:
+          new Date().toISOString()
+      };
+  }
+
+  if (
+    Array.isArray(
+      data.news
+    ) &&
     data.news.length
   ) {
-    data.provenance.news = {
-      source:
-        "Yahoo Finance news search",
-      ts:
-        new Date().toISOString(),
-      sentiment:
-        "rule-based headline heuristic"
-    };
+    data.provenance
+      .news = {
+        source:
+          "Yahoo Finance news search",
+
+        ts:
+          new Date().toISOString(),
+
+        sentiment:
+          "rule-based headline heuristic"
+      };
   }
+
+  /*
+    Helpful diagnostic status.
+  */
 
   data.enrichment.summary = {
     quote:
-      !!data.enrichment.quote.hasData,
+      !!data.enrichment
+        .quote.hasData,
 
     earnings:
       !!data.earnings,
@@ -1894,24 +2033,30 @@ async function enrich(
       !!data.options,
 
     news:
+      Array.isArray(
+        data.news
+      ) &&
       data.news.length > 0,
 
     shortInterest:
       data.fundamentals
-        ?.shortPctFloat != null,
+        ?.shortPctFloat !=
+        null,
 
     catalysts:
-      data.catalysts.length,
-
-    eventRisk:
-      data.eventRisk?.level !==
-      "Unavailable"
+      Array.isArray(
+        data.catalysts
+      )
+        ? data.catalysts.length
+        : 0
   };
 
   CACHE.set(
     key,
     {
-      time: Date.now(),
+      time:
+        Date.now(),
+
       data
     }
   );
@@ -1970,6 +2115,7 @@ async function getStock(
         {
           time:
             Date.now(),
+
           data
         }
       );
@@ -1977,12 +2123,15 @@ async function getStock(
       return data;
 
     } catch (e) {
-      lastError = e;
+      lastError =
+        e;
 
       if (
         attempt === 0
       ) {
-        await sleep(1500);
+        await sleep(
+          1200
+        );
       }
     }
   }
@@ -2019,7 +2168,9 @@ function sendJSON(
   );
 
   res.end(
-    JSON.stringify(data)
+    JSON.stringify(
+      data
+    )
   );
 }
 
@@ -2027,7 +2178,9 @@ function sendJSON(
    HTML
 ========================================================= */
 
-function serveHTML(res) {
+function serveHTML(
+  res
+) {
   try {
     const file =
       fs.readFileSync(
@@ -2049,7 +2202,9 @@ function serveHTML(res) {
       }
     );
 
-    res.end(file);
+    res.end(
+      file
+    );
 
   } catch (e) {
     sendJSON(
@@ -2057,6 +2212,7 @@ function serveHTML(res) {
       500,
       {
         ok: false,
+
         error:
           "Unable to load Trade Radar HTML"
       }
@@ -2070,7 +2226,10 @@ function serveHTML(res) {
 
 const server =
   http.createServer(
-    async (req, res) => {
+    async (
+      req,
+      res
+    ) => {
       try {
         const u =
           new URL(
@@ -2078,9 +2237,9 @@ const server =
             `http://${req.headers.host}`
           );
 
-        /*
-          HEALTH
-        */
+        /* -------------------------
+           HEALTH
+        ------------------------- */
 
         if (
           u.pathname ===
@@ -2099,19 +2258,28 @@ const server =
                 new Date().toISOString(),
 
               providers: {
-                yahoo: true,
-                quote: true,
-                options: true,
-                earnings: true,
-                news: true
+                yahoo:
+                  true,
+
+                quote:
+                  true,
+
+                options:
+                  true,
+
+                earnings:
+                  true,
+
+                news:
+                  true
               }
             }
           );
         }
 
-        /*
-          STOCK
-        */
+        /* -------------------------
+           STOCK
+        ------------------------- */
 
         if (
           u.pathname ===
@@ -2130,6 +2298,7 @@ const server =
               400,
               {
                 ok: false,
+
                 error:
                   "TR-201: Missing stock symbol"
               }
@@ -2147,6 +2316,7 @@ const server =
               200,
               {
                 ok: true,
+
                 data
               }
             );
@@ -2157,6 +2327,7 @@ const server =
               502,
               {
                 ok: false,
+
                 error:
                   "TR-206: Market data unavailable. " +
                   e.message
@@ -2165,9 +2336,9 @@ const server =
           }
         }
 
-        /*
-          WEBSITE
-        */
+        /* -------------------------
+           WEBSITE
+        ------------------------- */
 
         if (
           u.pathname === "/" ||
@@ -2181,12 +2352,18 @@ const server =
           );
         }
 
+        /* -------------------------
+           NOT FOUND
+        ------------------------- */
+
         return sendJSON(
           res,
           404,
           {
             ok: false,
-            error: "Not found"
+
+            error:
+              "Not found"
           }
         );
 
@@ -2196,6 +2373,7 @@ const server =
           500,
           {
             ok: false,
+
             error:
               "TR-500: " +
               e.message
